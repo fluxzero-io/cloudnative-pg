@@ -348,7 +348,7 @@ var _ = Describe("retryUntilDeadline", func() {
 		Expect(atomic.LoadInt32(&calls)).To(Equal(int32(2)))
 	})
 
-	It("maps context cancellation to ErrRetryTimeoutReached (don't let PostgreSQL promote)", func() {
+	It("maps context cancellation to ErrRetryTimeoutReached", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		err := retryUntilDeadline(

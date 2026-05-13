@@ -33,9 +33,7 @@ import (
 )
 
 // ErrRetryTimeoutReached is returned when the retry loop has exhausted its
-// configurable budget without downloading the WAL. The caller is expected to
-// translate this into exit code 255 so that PostgreSQL stops log-shipping
-// replication instead of promoting itself prematurely.
+// configurable budget without downloading the WAL.
 var ErrRetryTimeoutReached = errors.New("retry timeout reached while restoring WAL")
 
 // ErrTransientRestore marks a wal-restore failure that the retry loop should
@@ -43,14 +41,12 @@ var ErrRetryTimeoutReached = errors.New("retry timeout reached while restoring W
 // "anything not in a sentinel list is transient": the latter would loop on
 // genuinely-final errors (cache misses, malformed WAL names, programmer
 // errors), blocking PostgreSQL for the entire retry budget on each
-// invocation. Old behavior — return exit 1, let PostgreSQL fall back to
-// streaming — is the safer default; opt into retries only when we have a
-// positive signal that the failure is recoverable.
+// invocation. Opt into retries only when we have a positive signal that the
+// failure is recoverable.
 var ErrTransientRestore = errors.New("transient WAL restore failure")
 
 // DefaultMaxRetryTimeout is the default budget for retrying transient
-// WAL-restore failures. After this deadline the command will ask PostgreSQL
-// to stop replication (exit 255).
+// WAL-restore failures.
 const DefaultMaxRetryTimeout = 5 * time.Minute
 
 // retryBackoffCap is the maximum interval between retry attempts. We start

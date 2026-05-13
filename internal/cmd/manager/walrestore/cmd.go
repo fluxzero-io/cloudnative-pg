@@ -43,10 +43,12 @@ import (
 )
 
 // exitCodeRetryTimeoutReached is the process exit code used when the retry
-// budget is exhausted on transient errors. PostgreSQL treats this as a fatal
-// failure of restore_command and stops log-shipping replication instead of
-// promoting the replica on a partial archive.
-const exitCodeRetryTimeoutReached = 255
+// budget is exhausted on transient errors. We use 143 (128+SIGTERM) because
+// wait_result_is_any_signal in xlogarchive.c:RestoreArchivedFile detects it
+// as SIGTERM and calls proc_exit(1), causing a clean PostgreSQL shutdown
+// rather than XLREAD_FAIL (which would silently open PostgreSQL as primary
+// with unapplied WAL). See doc.go for the full rationale.
+const exitCodeRetryTimeoutReached = 143
 
 var (
 	// ErrEndOfWALStreamReached is returned when end of WAL is detected in the cloud archive
@@ -81,7 +83,7 @@ func NewCmd() *cobra.Command {
 			// TODO: We need to implement a logpipe to prevent this.
 			contextLog := log.WithName("wal-restore")
 			ctx := log.IntoContext(cobraCmd.Context(), contextLog)
-			err := runWithRetry(ctx, pgData, podName, args)
+			err := runWalRestore(ctx, pgData, podName, args)
 			if err == nil {
 				return nil
 			}
@@ -139,29 +141,32 @@ func resolveMaxRetryTimeout(cluster *apiv1.Cluster) time.Duration {
 	return cluster.Spec.WalRestoreRetryTimeout.Duration
 }
 
-// runWithRetry wraps the single-shot restore attempt in a retry loop so that
-// transient errors (flaky network, cloud provider hiccups, plugin glitches)
-// do not cause PostgreSQL to promote a replica on an incomplete archive.
+// runWalRestore runs a single WAL restore attempt. When this pod is the
+// designated primary (cluster.Status.TargetPrimary == podName), transient
+// failures are retried until the configurable budget expires rather than
+// surfaced immediately to PostgreSQL. See doc.go for the full rationale.
 //
-// The loop returns as soon as it has a final answer:
+// When TargetPrimary does not match this pod, run() is called directly.
+//
+// Returns:
 //   - nil on success,
-//   - barmanRestorer.ErrWALNotFound when the WAL is definitively absent
-//     (PostgreSQL's own retry logic handles that case — e.g. it will try
-//     streaming replication next),
-//   - ErrNoBackupConfigured / ErrEndOfWALStreamReached to preserve the
-//     existing upstream behaviors,
-//   - ErrRetryTimeoutReached when the retry budget expires on transient
-//     errors (the caller maps this to exit 255 to stop replication).
-func runWithRetry(
+//   - barmanRestorer.ErrWALNotFound when the WAL is definitively absent,
+//   - ErrNoBackupConfigured / ErrEndOfWALStreamReached to preserve existing
+//     upstream behaviors,
+//   - ErrRetryTimeoutReached when the retry budget expires on transient errors.
+func runWalRestore(
 	ctx context.Context,
 	pgData string,
 	podName string,
 	args []string,
 ) error {
-	// Resolve the retry budget before the first attempt. If the cache is
-	// transiently unavailable we fall back to the default, and run() will
-	// surface the real cache error on the first attempt if it persists.
-	timeout := resolveMaxRetryTimeout(loadClusterForTimeout(ctx))
+	cluster := loadClusterFromCache(ctx)
+
+	if cluster == nil || cluster.Status.TargetPrimary != podName {
+		return run(ctx, pgData, podName, args)
+	}
+
+	timeout := resolveMaxRetryTimeout(cluster)
 	return retryUntilDeadline(ctx,
 		func(ctx context.Context) error {
 			return run(ctx, pgData, podName, args)
@@ -246,16 +251,15 @@ func combineBarmanFailureWithPluginContext(
 	return barmanErr
 }
 
-// loadClusterForTimeout returns the cluster from the local cache, or nil on
-// failure. Cache unavailability is non-fatal for timeout resolution: we
-// simply fall back to the default. The real cache error (if any) will be
-// surfaced by run() itself on the first attempt.
-func loadClusterForTimeout(ctx context.Context) *apiv1.Cluster {
+// loadClusterFromCache returns the cluster from the local cache, or nil on
+// failure. The caller must treat nil as "cache unavailable" and fall back to
+// safe defaults. The real cache error (if any) will be surfaced by run() on
+// the first restore attempt.
+func loadClusterFromCache(ctx context.Context) *apiv1.Cluster {
 	contextLog := log.FromContext(ctx)
 	cluster, err := local.NewClient().Cache().GetCluster()
 	if err != nil {
-		contextLog.Debug("could not load cluster from cache while computing retry timeout, using default",
-			"error", err)
+		contextLog.Debug("could not load cluster from cache", "error", err)
 		return nil
 	}
 	return cluster
