@@ -27,6 +27,7 @@ import (
 	cnpgTypes "github.com/cloudnative-pg/machinery/pkg/types"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -329,6 +330,256 @@ var _ = Describe("Updating target primary", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(instanceToCreate).ToNot(BeNil())
 			Expect(instanceToCreate.Name).To(Equal(instance2Name))
+		})
+
+	It("does not recreate a podless PVC while offline expansion is pending",
+		func(ctx SpecContext) {
+			namespace := newFakeNamespace(env.client)
+			cluster := newFakeCNPGCluster(env.client, namespace, func(cluster *apiv1.Cluster) {
+				cluster.Spec.Instances = 2
+				cluster.Spec.StorageConfiguration.ResizeStrategy = apiv1.StorageResizeStrategyOffline
+				cluster.Status.LatestGeneratedNode = 2
+				cluster.Status.ReadyInstances = 1
+			})
+
+			By("creating cluster PVCs whose requests are larger than their capacity")
+			pvcs := generateClusterPVC(env.client, cluster, persistentvolumeclaim.StatusReady)
+			for i := range pvcs {
+				pvcs[i].Status.Phase = corev1.ClaimBound
+				pvcs[i].Spec.Resources.Requests = corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("2Gi"),
+				}
+				pvcs[i].Status.Capacity = corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				}
+				pvcs[i].Status.Conditions = append(pvcs[i].Status.Conditions, corev1.PersistentVolumeClaimCondition{
+					Type:   corev1.PersistentVolumeClaimResizing,
+					Status: corev1.ConditionTrue,
+				})
+			}
+
+			By("creating a pod for instance 1 only")
+			pod1, err := specs.NewInstance(ctx, *cluster, 1, true)
+			Expect(err).ToNot(HaveOccurred())
+			cluster.SetInheritedDataAndOwnership(&pod1.ObjectMeta)
+			Expect(env.client.Create(ctx, pod1)).To(Succeed())
+			pod1.Status = corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			}
+
+			By("running EnrichStatus to classify the podless PVC as offline resizing")
+			persistentvolumeclaim.EnrichStatus(ctx, cluster, []corev1.Pod{*pod1}, []batchv1.Job{}, pvcs)
+			instance2Name := specs.GetInstanceName(cluster.Name, 2)
+			Expect(cluster.Status.ResizingPVC).Should(Equal([]string{specs.GetInstanceName(cluster.Name, 1)}))
+			Expect(persistentvolumeclaim.IsOfflineResizePendingForInstance(cluster, instance2Name, pvcs)).To(BeTrue())
+			Expect(cluster.Status.DanglingPVC).Should(BeEmpty())
+
+			By("verifying findInstancePodToCreate does not select the offline-resizing PVC")
+			statusList := postgres.PostgresqlStatusList{
+				Items: []postgres.PostgresqlStatus{
+					{
+						IsPodReady: true,
+						IsPrimary:  true,
+						Pod:        pod1,
+					},
+				},
+			}
+			instanceToCreate, err := findInstancePodToCreate(ctx, cluster, statusList, pvcs)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(instanceToCreate).To(BeNil())
+		})
+
+	It("does not recreate an instance until every PVC in the group is ready to attach",
+		func(ctx SpecContext) {
+			namespace := newFakeNamespace(env.client)
+			cluster := newFakeCNPGCluster(env.client, namespace, func(cluster *apiv1.Cluster) {
+				cluster.Spec.Instances = 2
+				cluster.Spec.StorageConfiguration.ResizeStrategy = apiv1.StorageResizeStrategyOffline
+				cluster.Spec.WalStorage = &apiv1.StorageConfiguration{
+					Size:           "1G",
+					ResizeStrategy: apiv1.StorageResizeStrategyOffline,
+				}
+				cluster.Status.LatestGeneratedNode = 2
+				cluster.Status.ReadyInstances = 1
+			})
+
+			instance2Name := specs.GetInstanceName(cluster.Name, 2)
+			instance2WalName := persistentvolumeclaim.NewPgWalCalculator().GetName(instance2Name)
+
+			By("creating PVCs where PGDATA completed expansion but WAL still needs to stay detached")
+			pvcs := generateClusterPVC(env.client, cluster, persistentvolumeclaim.StatusReady)
+			for i := range pvcs {
+				pvcs[i].Status.Phase = corev1.ClaimBound
+				pvcs[i].Spec.Resources.Requests = corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("2Gi"),
+				}
+				pvcs[i].Status.Capacity = corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("2Gi"),
+				}
+				if pvcs[i].Name == instance2WalName {
+					pvcs[i].Status.Capacity = corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("1Gi"),
+					}
+				}
+			}
+
+			By("creating a pod for instance 1 only")
+			pod1, err := specs.NewInstance(ctx, *cluster, 1, true)
+			Expect(err).ToNot(HaveOccurred())
+			cluster.SetInheritedDataAndOwnership(&pod1.ObjectMeta)
+			Expect(env.client.Create(ctx, pod1)).To(Succeed())
+			pod1.Status = corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			}
+
+			By("running EnrichStatus to classify the partially expanded PVC group")
+			persistentvolumeclaim.EnrichStatus(ctx, cluster, []corev1.Pod{*pod1}, []batchv1.Job{}, pvcs)
+			Expect(cluster.Status.DanglingPVC).Should(ContainElement(instance2Name))
+			Expect(persistentvolumeclaim.IsOfflineResizePendingForInstance(cluster, instance2Name, pvcs)).To(BeTrue())
+
+			By("verifying the dangling PGDATA PVC does not cause early pod recreation")
+			statusList := postgres.PostgresqlStatusList{
+				Items: []postgres.PostgresqlStatus{
+					{
+						IsPodReady: true,
+						IsPrimary:  true,
+						Pod:        pod1,
+					},
+				},
+			}
+			instanceToCreate, err := findInstancePodToCreate(ctx, cluster, statusList, pvcs)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(instanceToCreate).To(BeNil())
+
+			By("allowing the pod to be recreated once the whole PVC group can be attached")
+			for i := range pvcs {
+				if pvcs[i].Name == instance2WalName {
+					pvcs[i].Status.Capacity = corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("2Gi"),
+					}
+				}
+			}
+			persistentvolumeclaim.EnrichStatus(ctx, cluster, []corev1.Pod{*pod1}, []batchv1.Job{}, pvcs)
+
+			instanceToCreate, err = findInstancePodToCreate(ctx, cluster, statusList, pvcs)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(instanceToCreate).ToNot(BeNil())
+			Expect(instanceToCreate.Name).To(Equal(instance2Name))
+		})
+
+	It("keeps the full-disk guard for a primary waiting for offline resize without a switchover target",
+		func(ctx SpecContext) {
+			namespace := newFakeNamespace(env.client)
+			cluster := newFakeCNPGCluster(env.client, namespace, func(cluster *apiv1.Cluster) {
+				cluster.Spec.Instances = 2
+				cluster.Spec.StorageConfiguration.ResizeStrategy = apiv1.StorageResizeStrategyOffline
+				cluster.Status.Instances = 2
+			})
+
+			instances := generateFakeClusterPods(env.client, cluster, true)
+			cluster.Status.CurrentPrimary = instances[0].Name
+			pvcs := generateClusterPVC(env.client, cluster, persistentvolumeclaim.StatusReady)
+			for idx := range pvcs {
+				pvcs[idx].Status.Phase = corev1.ClaimBound
+				pvcs[idx].Spec.Resources.Requests = corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("2Gi"),
+				}
+				pvcs[idx].Status.Capacity = corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				}
+			}
+			instances[0].Status.ContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name: specs.PostgresContainerName,
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: apiv1.MissingWALDiskSpaceExitCode,
+						},
+					},
+				},
+			}
+
+			statusList := postgres.PostgresqlStatusList{
+				Items: []postgres.PostgresqlStatus{
+					{
+						IsPrimary:          true,
+						IsPodReady:         false,
+						Pod:                &instances[0],
+						MightBeUnavailable: true,
+					},
+					{
+						IsPodReady:          true,
+						IsWalReceiverActive: true,
+						Pod:                 &instances[1],
+					},
+				},
+			}
+
+			res, err := env.clusterReconciler.ensureNoFailoverOnFullDisk(ctx, cluster, statusList, pvcs)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(10 * time.Second))
+		})
+
+	It("lets a full-disk primary offline resize continue when a resized replica can be promoted",
+		func(ctx SpecContext) {
+			namespace := newFakeNamespace(env.client)
+			cluster := newFakeCNPGCluster(env.client, namespace, func(cluster *apiv1.Cluster) {
+				cluster.Spec.Instances = 2
+				cluster.Spec.StorageConfiguration.ResizeStrategy = apiv1.StorageResizeStrategyOffline
+				cluster.Status.Instances = 2
+			})
+
+			instances := generateFakeClusterPods(env.client, cluster, true)
+			cluster.Status.CurrentPrimary = instances[0].Name
+			pvcs := generateClusterPVC(env.client, cluster, persistentvolumeclaim.StatusReady)
+			for idx := range pvcs {
+				pvcs[idx].Status.Phase = corev1.ClaimBound
+				pvcs[idx].Spec.Resources.Requests = corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("2Gi"),
+				}
+				pvcs[idx].Status.Capacity = corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				}
+			}
+			pvcs[1].Status.Capacity = corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("2Gi"),
+			}
+			instances[0].Status.ContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name: specs.PostgresContainerName,
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: apiv1.MissingWALDiskSpaceExitCode,
+						},
+					},
+				},
+			}
+
+			statusList := postgres.PostgresqlStatusList{
+				Items: []postgres.PostgresqlStatus{
+					{
+						IsPrimary:          true,
+						IsPodReady:         false,
+						Pod:                &instances[0],
+						MightBeUnavailable: true,
+					},
+					{
+						IsPodReady:          true,
+						IsWalReceiverActive: true,
+						Pod:                 &instances[1],
+					},
+				},
+			}
+
+			res, err := env.clusterReconciler.ensureNoFailoverOnFullDisk(ctx, cluster, statusList, pvcs)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.IsZero()).To(BeTrue())
 		})
 })
 

@@ -1378,6 +1378,19 @@ const (
 	DefaultStartupDelay = 3600
 )
 
+// StorageResizeStrategy defines how the operator orchestrates PVC expansion.
+type StorageResizeStrategy string
+
+const (
+	// StorageResizeStrategyOnline keeps the existing behavior and allows pod
+	// recreation while Kubernetes completes volume expansion.
+	StorageResizeStrategyOnline StorageResizeStrategy = "online"
+
+	// StorageResizeStrategyOffline keeps a podless PVC detached while
+	// controller-side volume expansion is still pending.
+	StorageResizeStrategyOffline StorageResizeStrategy = "offline"
+)
+
 // SynchronousReplicaConfigurationMethod configures whether to use
 // quorum based replication or a priority list
 type SynchronousReplicaConfigurationMethod string
@@ -2164,6 +2177,16 @@ type StorageConfiguration struct {
 	// +optional
 	// +kubebuilder:default:=true
 	ResizeInUseVolumes *bool `json:"resizeInUseVolumes,omitempty"`
+
+	// Strategy used by the operator to orchestrate PVC expansion.
+	// The default value is online, which preserves the existing behavior.
+	// The offline strategy keeps a podless PVC detached while controller-side volume
+	// expansion is still pending.
+	// This value cannot be changed after PVCs have been created.
+	// +optional
+	// +kubebuilder:default:=online
+	// +kubebuilder:validation:Enum:=online;offline
+	ResizeStrategy StorageResizeStrategy `json:"resizeStrategy,omitempty"`
 
 	// Template to be used to generate the Persistent Volume Claim
 	// +optional

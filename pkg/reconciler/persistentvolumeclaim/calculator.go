@@ -211,6 +211,10 @@ func (r pgWalCalculator) GetName(instanceName string) string {
 // GetStorageConfiguration will return the storage configuration to be used
 // for this PVC role and this cluster
 func (r pgWalCalculator) GetStorageConfiguration(cluster *apiv1.Cluster) (apiv1.StorageConfiguration, error) {
+	if cluster.Spec.WalStorage == nil {
+		return apiv1.StorageConfiguration{},
+			fmt.Errorf("storage configuration doesn't exist for the given PVC role: %s", utils.PVCRolePgWal)
+	}
 	return *cluster.Spec.WalStorage, nil
 }
 

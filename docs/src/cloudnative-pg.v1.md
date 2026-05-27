@@ -2828,7 +2828,26 @@ _Appears in:_
 | `storageClass` _string_ | StorageClass to use for PVCs. Applied after<br />evaluating the PVC template, if available.<br />If not specified, the generated PVCs will use the<br />default storage class |  |  |  |
 | `size` _string_ | Size of the storage. Required if not already specified in the PVC template.<br />Changes to this field are automatically reapplied to the created PVCs.<br />Size cannot be decreased. |  |  |  |
 | `resizeInUseVolumes` _boolean_ | Resize existent PVCs, defaults to true |  | true |  |
+| `resizeStrategy` _[StorageResizeStrategy](#storageresizestrategy)_ | Strategy used by the operator to orchestrate PVC expansion.<br />The default value is online, which preserves the existing behavior.<br />The offline strategy keeps a podless PVC detached while controller-side volume<br />expansion is still pending.<br />This value cannot be changed after PVCs have been created. |  | online | Enum: [online offline] <br /> |
 | `pvcTemplate` _[PersistentVolumeClaimSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#persistentvolumeclaimspec-v1-core)_ | Template to be used to generate the Persistent Volume Claim |  |  |  |
+
+
+#### StorageResizeStrategy
+
+_Underlying type:_ _string_
+
+StorageResizeStrategy defines how the operator orchestrates PVC expansion.
+
+
+
+_Appears in:_
+
+- [StorageConfiguration](#storageconfiguration)
+
+| Field | Description |
+| --- | --- |
+| `online` | StorageResizeStrategyOnline keeps the existing behavior and allows pod<br />recreation while Kubernetes completes volume expansion.<br /> |
+| `offline` | StorageResizeStrategyOffline keeps a podless PVC detached while<br />controller-side volume expansion is still pending.<br /> |
 
 
 #### Subscription
@@ -3149,7 +3168,3 @@ _Appears in:_
 | `snapshotOwnerReference` _[SnapshotOwnerReference](#snapshotownerreference)_ | SnapshotOwnerReference indicates the type of owner reference the snapshot should have |  | none | Enum: [none cluster backup] <br /> |
 | `online` _boolean_ | Whether the default type of backup with volume snapshots is<br />online/hot (`true`, default) or offline/cold (`false`) |  | true |  |
 | `onlineConfiguration` _[OnlineConfiguration](#onlineconfiguration)_ | Configuration parameters to control the online/hot backup with volume snapshots |  | \{ immediateCheckpoint:false waitForArchive:true \} |  |
-
-
-
-

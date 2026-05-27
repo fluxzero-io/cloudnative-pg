@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
 )
 
 // FilterByPodSpec returns all the corev1.PersistentVolumeClaim that are used inside the podSpec
@@ -77,6 +78,118 @@ func hasPVCCondition(pvc corev1.PersistentVolumeClaim, condType corev1.Persisten
 
 func isResizing(pvc corev1.PersistentVolumeClaim) bool {
 	return hasPVCCondition(pvc, corev1.PersistentVolumeClaimResizing)
+}
+
+type resizeState string
+
+const (
+	resizeStateNone              resizeState = "none"
+	resizeStateControllerPending resizeState = "controllerPending"
+	resizeStateNodePending       resizeState = "nodePending"
+	resizeStateFailed            resizeState = "failed"
+)
+
+// RequestedStorageGreaterThanCapacity returns true when the PVC request has
+// been expanded but Kubernetes still reports the old capacity.
+func RequestedStorageGreaterThanCapacity(pvc corev1.PersistentVolumeClaim) bool {
+	requestedStorage := pvc.Spec.Resources.Requests.Storage()
+	if requestedStorage == nil || requestedStorage.IsZero() {
+		return false
+	}
+
+	currentCapacity := pvc.Status.Capacity.Storage()
+	if currentCapacity == nil || currentCapacity.IsZero() {
+		return false
+	}
+
+	return requestedStorage.AsDec().Cmp(currentCapacity.AsDec()) > 0
+}
+
+func getResizeState(pvc corev1.PersistentVolumeClaim) resizeState {
+	if status, ok := pvc.Status.AllocatedResourceStatuses[corev1.ResourceStorage]; ok {
+		switch status {
+		case corev1.PersistentVolumeClaimControllerResizeInProgress:
+			return resizeStateControllerPending
+		case corev1.PersistentVolumeClaimNodeResizePending, corev1.PersistentVolumeClaimNodeResizeInProgress:
+			return resizeStateNodePending
+		case corev1.PersistentVolumeClaimControllerResizeInfeasible, corev1.PersistentVolumeClaimNodeResizeInfeasible:
+			return resizeStateFailed
+		}
+	}
+
+	if hasPVCCondition(pvc, corev1.PersistentVolumeClaimFileSystemResizePending) {
+		return resizeStateNodePending
+	}
+
+	if RequestedStorageGreaterThanCapacity(pvc) {
+		return resizeStateControllerPending
+	}
+
+	return resizeStateNone
+}
+
+// IsOfflineResizePending returns true when the PVC must remain detached until
+// the controller-side expansion is ready for the filesystem resize.
+func IsOfflineResizePending(cluster *apiv1.Cluster, pvc corev1.PersistentVolumeClaim) bool {
+	if pvc.Annotations[utils.PVCStatusAnnotationName] != StatusReady {
+		return false
+	}
+
+	if pvc.Status.Phase != corev1.ClaimBound {
+		return false
+	}
+
+	if getResizeState(pvc) != resizeStateControllerPending {
+		return false
+	}
+
+	calculator, err := GetExpectedObjectCalculator(pvc.Labels)
+	if err != nil {
+		return false
+	}
+
+	storageConfiguration, err := calculator.GetStorageConfiguration(cluster)
+	if err != nil {
+		return false
+	}
+
+	return storageConfiguration.UsesOfflineResizeStrategy()
+}
+
+// IsOfflineResizePendingForPod returns true when at least one PVC attached to
+// the Pod is waiting for offline expansion.
+func IsOfflineResizePendingForPod(
+	cluster *apiv1.Cluster,
+	pod *corev1.Pod,
+	pvcs []corev1.PersistentVolumeClaim,
+) bool {
+	if pod == nil {
+		return false
+	}
+
+	for _, pvc := range FilterByPodSpec(pvcs, pod.Spec) {
+		if IsOfflineResizePending(cluster, pvc) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// IsOfflineResizePendingForInstance returns true when at least one expected PVC
+// for the instance must stay detached until controller-side expansion completes.
+func IsOfflineResizePendingForInstance(
+	cluster *apiv1.Cluster,
+	instanceName string,
+	pvcs []corev1.PersistentVolumeClaim,
+) bool {
+	for _, pvc := range filterByInstanceExpectedPVCs(cluster, instanceName, pvcs) {
+		if IsOfflineResizePending(cluster, pvc) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // BelongToInstance returns a boolean indicating if that given PVC belongs to an instance

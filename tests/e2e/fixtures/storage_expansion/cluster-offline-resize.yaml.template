@@ -1,0 +1,28 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: offline-resize
+spec:
+  instances: 2
+
+  bootstrap:
+    initdb:
+      database: app
+      owner: appuser
+
+  primaryUpdateMethod: restart
+
+  storage:
+    size: 1Gi
+    storageClass: ${E2E_OFFLINE_RESIZE_STORAGE_CLASS}
+    resizeStrategy: offline
+  walStorage:
+    size: 1Gi
+    storageClass: ${E2E_OFFLINE_RESIZE_STORAGE_CLASS}
+    resizeStrategy: offline
+  tablespaces:
+    - name: archive
+      storage:
+        size: 1Gi
+        storageClass: ${E2E_OFFLINE_RESIZE_STORAGE_CLASS}
+        resizeStrategy: offline

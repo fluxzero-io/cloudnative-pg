@@ -168,8 +168,11 @@ func (v *ClusterCustomValidator) validate(r *apiv1.Cluster) (allErrs field.Error
 		v.validateMaxSyncReplicas,
 		v.validateStorageSize,
 		v.validateWalStorageSize,
+		v.validateStorageResizeStrategy,
+		v.validateWalStorageResizeStrategy,
 		v.validateEphemeralVolumeSource,
 		v.validateTablespaceStorageSize,
+		v.validateTablespaceStorageResizeStrategy,
 		v.validateName,
 		v.validateTablespaceNames,
 		v.validateBootstrapPgBaseBackupSource,
@@ -1623,6 +1626,60 @@ func (v *ClusterCustomValidator) validateTablespaceStorageSize(r *apiv1.Cluster)
 	return result
 }
 
+func (v *ClusterCustomValidator) validateStorageResizeStrategy(r *apiv1.Cluster) field.ErrorList {
+	return validateStorageConfigurationResizeStrategy(
+		field.NewPath("spec", "storage"),
+		r.Spec.StorageConfiguration,
+	)
+}
+
+func (v *ClusterCustomValidator) validateWalStorageResizeStrategy(r *apiv1.Cluster) field.ErrorList {
+	if !r.ShouldCreateWalArchiveVolume() {
+		return nil
+	}
+
+	return validateStorageConfigurationResizeStrategy(
+		field.NewPath("spec", "walStorage"),
+		*r.Spec.WalStorage,
+	)
+}
+
+func (v *ClusterCustomValidator) validateTablespaceStorageResizeStrategy(r *apiv1.Cluster) field.ErrorList {
+	if r.Spec.Tablespaces == nil {
+		return nil
+	}
+
+	var result field.ErrorList
+	for idx, tablespaceConf := range r.Spec.Tablespaces {
+		result = append(result,
+			validateStorageConfigurationResizeStrategy(
+				field.NewPath("spec", "tablespaces").Index(idx).Child("storage"),
+				tablespaceConf.Storage)...,
+		)
+	}
+	return result
+}
+
+func validateStorageConfigurationResizeStrategy(
+	structPath *field.Path,
+	storageConfiguration apiv1.StorageConfiguration,
+) field.ErrorList {
+	switch storageConfiguration.ResizeStrategy {
+	case "", apiv1.StorageResizeStrategyOnline, apiv1.StorageResizeStrategyOffline:
+		return nil
+	default:
+		return field.ErrorList{
+			field.NotSupported(
+				structPath.Child("resizeStrategy"),
+				storageConfiguration.ResizeStrategy,
+				[]string{
+					string(apiv1.StorageResizeStrategyOnline),
+					string(apiv1.StorageResizeStrategyOffline),
+				}),
+		}
+	}
+}
+
 func validateStorageConfigurationSize(
 	structPath field.Path,
 	storageConfiguration apiv1.StorageConfiguration,
@@ -1656,6 +1713,7 @@ func (v *ClusterCustomValidator) validateStorageChange(r, old *apiv1.Cluster) fi
 		field.NewPath("spec", "storage"),
 		old.Spec.StorageConfiguration,
 		r.Spec.StorageConfiguration,
+		old.Status.PVCCount > 0,
 	)
 }
 
@@ -1677,6 +1735,7 @@ func (v *ClusterCustomValidator) validateWalStorageChange(r, old *apiv1.Cluster)
 		field.NewPath("spec", "walStorage"),
 		*old.Spec.WalStorage,
 		*r.Spec.WalStorage,
+		old.Status.PVCCount > 0,
 	)
 }
 
@@ -1701,9 +1760,10 @@ func (v *ClusterCustomValidator) validateTablespacesChange(r, old *apiv1.Cluster
 		name := oldConf.Name
 		if newConf := r.GetTablespaceConfiguration(name); newConf != nil {
 			errs = append(errs, validateStorageConfigurationChange(
-				field.NewPath("spec", "tablespaces").Index(idx),
+				field.NewPath("spec", "tablespaces").Index(idx).Child("storage"),
 				oldConf.Storage,
 				newConf.Storage,
+				old.Status.PVCCount > 0,
 			)...)
 		} else {
 			errs = append(errs,
@@ -1721,30 +1781,38 @@ func validateStorageConfigurationChange(
 	structPath *field.Path,
 	oldStorage apiv1.StorageConfiguration,
 	newStorage apiv1.StorageConfiguration,
+	rejectResizeStrategyChange bool,
 ) field.ErrorList {
+	var result field.ErrorList
+	if rejectResizeStrategyChange && oldStorage.GetResizeStrategy() != newStorage.GetResizeStrategy() {
+		result = append(result, field.Invalid(
+			structPath.Child("resizeStrategy"),
+			newStorage.ResizeStrategy,
+			"resizeStrategy cannot be changed after PVCs have been created"))
+	}
+
 	oldSize := oldStorage.GetSizeOrNil()
 	if oldSize == nil {
 		// Can't read the old size, so can't tell if the new size is greater
 		// or less
-		return nil
+		return result
 	}
 
 	newSize := newStorage.GetSizeOrNil()
 	if newSize == nil {
 		// Can't read the new size, so can't tell if it is increasing
-		return nil
+		return result
 	}
 
 	if oldSize.AsDec().Cmp(newSize.AsDec()) < 1 {
-		return nil
+		return result
 	}
 
-	return field.ErrorList{
+	return append(result,
 		field.Invalid(
 			structPath,
 			newSize,
-			fmt.Sprintf("can't shrink existing storage from %v to %v", oldSize, newSize)),
-	}
+			fmt.Sprintf("can't shrink existing storage from %v to %v", oldSize, newSize)))
 }
 
 // Validate the cluster name. This is important to avoid issues

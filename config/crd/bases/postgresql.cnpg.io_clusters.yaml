@@ -6110,6 +6110,18 @@ spec:
                     default: true
                     description: Resize existent PVCs, defaults to true
                     type: boolean
+                  resizeStrategy:
+                    default: online
+                    description: |-
+                      Strategy used by the operator to orchestrate PVC expansion.
+                      The default value is online, which preserves the existing behavior.
+                      The offline strategy keeps a podless PVC detached while controller-side volume
+                      expansion is still pending.
+                      This value cannot be changed after PVCs have been created.
+                    enum:
+                    - online
+                    - offline
+                    type: string
                   size:
                     description: |-
                       Size of the storage. Required if not already specified in the PVC template.
@@ -6366,6 +6378,18 @@ spec:
                           default: true
                           description: Resize existent PVCs, defaults to true
                           type: boolean
+                        resizeStrategy:
+                          default: online
+                          description: |-
+                            Strategy used by the operator to orchestrate PVC expansion.
+                            The default value is online, which preserves the existing behavior.
+                            The offline strategy keeps a podless PVC detached while controller-side volume
+                            expansion is still pending.
+                            This value cannot be changed after PVCs have been created.
+                          enum:
+                          - online
+                          - offline
+                          type: string
                         size:
                           description: |-
                             Size of the storage. Required if not already specified in the PVC template.
@@ -6774,6 +6798,18 @@ spec:
                     default: true
                     description: Resize existent PVCs, defaults to true
                     type: boolean
+                  resizeStrategy:
+                    default: online
+                    description: |-
+                      Strategy used by the operator to orchestrate PVC expansion.
+                      The default value is online, which preserves the existing behavior.
+                      The offline strategy keeps a podless PVC detached while controller-side volume
+                      expansion is still pending.
+                      This value cannot be changed after PVCs have been created.
+                    enum:
+                    - online
+                    - offline
+                    type: string
                   size:
                     description: |-
                       Size of the storage. Required if not already specified in the PVC template.

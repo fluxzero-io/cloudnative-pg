@@ -92,6 +92,9 @@ const (
 	// LabelStorage is a label for selecting storage tests
 	LabelStorage = "storage"
 
+	// LabelOfflineResize is a label for selecting offline resize tests
+	LabelOfflineResize = "offline-resize"
+
 	// LabelTablespaces is a label for selecting the tablespaces test
 	LabelTablespaces = "tablespaces"
 

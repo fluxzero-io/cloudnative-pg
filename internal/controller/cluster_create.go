@@ -1457,6 +1457,13 @@ func findInstancePodToCreate(
 		if slices.Contains(instanceThatHavePods, instanceName) {
 			continue
 		}
+		if persistentvolumeclaim.IsOfflineResizePendingForInstance(cluster, instanceName, pvcs) {
+			log.FromContext(ctx).Debug(
+				"Waiting before reattaching PVC group because offline resize is still pending",
+				"instance", instanceName,
+			)
+			continue
+		}
 
 		// We give the priority to reattaching the primary instance
 		if isPrimary := specs.IsPrimary(pvcs[idx].ObjectMeta); isPrimary {

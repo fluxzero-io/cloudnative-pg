@@ -24,6 +24,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -96,6 +97,19 @@ var _ = Describe("PVC classification with resizing PVCs", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: clusterName},
 		}
 	}
+	makeOfflineCluster := func() *apiv1.Cluster {
+		cluster := makeCluster()
+		cluster.Spec.StorageConfiguration.ResizeStrategy = apiv1.StorageResizeStrategyOffline
+		return cluster
+	}
+	setPVCStorage := func(pvc *corev1.PersistentVolumeClaim, requested, capacity string) {
+		pvc.Spec.Resources.Requests = corev1.ResourceList{
+			corev1.ResourceStorage: resource.MustParse(requested),
+		}
+		pvc.Status.Capacity = corev1.ResourceList{
+			corev1.ResourceStorage: resource.MustParse(capacity),
+		}
+	}
 
 	It("classifies resizing PVC without pod and with FileSystemResizePending as dangling", func(ctx SpecContext) {
 		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
@@ -111,6 +125,49 @@ var _ = Describe("PVC classification with resizing PVCs", func() {
 	It("classifies resizing PVC without pod and without FileSystemResizePending as dangling", func(ctx SpecContext) {
 		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
 		cluster := makeCluster()
+		EnrichStatus(ctx, cluster, []corev1.Pod{}, []batchv1.Job{}, []corev1.PersistentVolumeClaim{pvc})
+		Expect(cluster.Status.DanglingPVC).Should(Equal([]string{clusterName + "-1"}))
+		Expect(cluster.Status.ResizingPVC).Should(BeEmpty())
+	})
+
+	It("classifies an offline podless undersized PVC as offline resizing", func(ctx SpecContext) {
+		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
+		setPVCStorage(&pvc, "2Gi", "1Gi")
+		cluster := makeOfflineCluster()
+		EnrichStatus(ctx, cluster, []corev1.Pod{}, []batchv1.Job{}, []corev1.PersistentVolumeClaim{pvc})
+		Expect(IsOfflineResizePending(cluster, pvc)).To(BeTrue())
+		Expect(cluster.Status.DanglingPVC).Should(BeEmpty())
+		Expect(cluster.Status.ResizingPVC).Should(BeEmpty())
+	})
+
+	It("allows pod recreation for offline resize once capacity reaches the request", func(ctx SpecContext) {
+		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
+		setPVCStorage(&pvc, "2Gi", "2Gi")
+		cluster := makeOfflineCluster()
+		EnrichStatus(ctx, cluster, []corev1.Pod{}, []batchv1.Job{}, []corev1.PersistentVolumeClaim{pvc})
+		Expect(cluster.Status.DanglingPVC).Should(Equal([]string{clusterName + "-1"}))
+		Expect(cluster.Status.ResizingPVC).Should(BeEmpty())
+	})
+
+	It("allows FileSystemResizePending PVC recreation after offline capacity expansion", func(ctx SpecContext) {
+		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
+		setPVCStorage(&pvc, "2Gi", "2Gi")
+		pvc.Status.Conditions = append(pvc.Status.Conditions, corev1.PersistentVolumeClaimCondition{
+			Type: corev1.PersistentVolumeClaimFileSystemResizePending, Status: corev1.ConditionTrue,
+		})
+		cluster := makeOfflineCluster()
+		EnrichStatus(ctx, cluster, []corev1.Pod{}, []batchv1.Job{}, []corev1.PersistentVolumeClaim{pvc})
+		Expect(cluster.Status.DanglingPVC).Should(Equal([]string{clusterName + "-1"}))
+		Expect(cluster.Status.ResizingPVC).Should(BeEmpty())
+	})
+
+	It("allows FileSystemResizePending PVC recreation before PVC status capacity catches up", func(ctx SpecContext) {
+		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
+		setPVCStorage(&pvc, "2Gi", "1Gi")
+		pvc.Status.Conditions = append(pvc.Status.Conditions, corev1.PersistentVolumeClaimCondition{
+			Type: corev1.PersistentVolumeClaimFileSystemResizePending, Status: corev1.ConditionTrue,
+		})
+		cluster := makeOfflineCluster()
 		EnrichStatus(ctx, cluster, []corev1.Pod{}, []batchv1.Job{}, []corev1.PersistentVolumeClaim{pvc})
 		Expect(cluster.Status.DanglingPVC).Should(Equal([]string{clusterName + "-1"}))
 		Expect(cluster.Status.ResizingPVC).Should(BeEmpty())

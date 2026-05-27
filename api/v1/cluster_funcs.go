@@ -391,6 +391,20 @@ func (s *StorageConfiguration) GetSizeOrNil() *resource.Quantity {
 	return nil
 }
 
+// GetResizeStrategy returns the configured resize strategy, defaulting to online.
+func (s *StorageConfiguration) GetResizeStrategy() StorageResizeStrategy {
+	if s == nil || s.ResizeStrategy == "" {
+		return StorageResizeStrategyOnline
+	}
+
+	return s.ResizeStrategy
+}
+
+// UsesOfflineResizeStrategy returns true when PVC expansion requires offline orchestration.
+func (s *StorageConfiguration) UsesOfflineResizeStrategy() bool {
+	return s.GetResizeStrategy() == StorageResizeStrategyOffline
+}
+
 // AreDefaultQueriesDisabled checks whether default monitoring queries should be disabled
 func (m *MonitoringConfiguration) AreDefaultQueriesDisabled() bool {
 	return m != nil && m.DisableDefaultQueries != nil && *m.DisableDefaultQueries

@@ -2133,6 +2133,94 @@ var _ = Describe("storage configuration validation", func() {
 
 		Expect(v.validateStorageChange(clusterNew, clusterOld)).To(BeEmpty())
 	})
+
+	It("accepts supported storage resize strategies", func() {
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				StorageConfiguration: apiv1.StorageConfiguration{
+					Size:           "1G",
+					ResizeStrategy: apiv1.StorageResizeStrategyOffline,
+				},
+			},
+		}
+
+		Expect(v.validateStorageResizeStrategy(cluster)).To(BeEmpty())
+	})
+
+	It("rejects unsupported storage resize strategies", func() {
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				StorageConfiguration: apiv1.StorageConfiguration{
+					Size:           "1G",
+					ResizeStrategy: apiv1.StorageResizeStrategy("detached"),
+				},
+			},
+		}
+
+		Expect(v.validateStorageResizeStrategy(cluster)).To(HaveLen(1))
+	})
+
+	It("allows changing storage resize strategy before PVCs exist", func() {
+		clusterOld := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				StorageConfiguration: apiv1.StorageConfiguration{
+					Size:           "1G",
+					ResizeStrategy: apiv1.StorageResizeStrategyOnline,
+				},
+			},
+		}
+		clusterNew := clusterOld.DeepCopy()
+		clusterNew.Spec.StorageConfiguration.ResizeStrategy = apiv1.StorageResizeStrategyOffline
+
+		Expect(v.validateStorageChange(clusterNew, clusterOld)).To(BeEmpty())
+	})
+
+	It("rejects changing storage resize strategy after PVCs exist", func() {
+		clusterOld := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				StorageConfiguration: apiv1.StorageConfiguration{
+					Size:           "1G",
+					ResizeStrategy: apiv1.StorageResizeStrategyOnline,
+				},
+			},
+			Status: apiv1.ClusterStatus{
+				PVCCount: 1,
+			},
+		}
+		clusterNew := clusterOld.DeepCopy()
+		clusterNew.Spec.StorageConfiguration.ResizeStrategy = apiv1.StorageResizeStrategyOffline
+
+		Expect(v.validateStorageChange(clusterNew, clusterOld)).To(HaveLen(1))
+	})
+
+	It("rejects changing WAL and tablespace resize strategies after PVCs exist", func() {
+		clusterOld := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				WalStorage: &apiv1.StorageConfiguration{
+					Size:           "1G",
+					ResizeStrategy: apiv1.StorageResizeStrategyOnline,
+				},
+				Tablespaces: []apiv1.TablespaceConfiguration{
+					{
+						Name: "archive",
+						Storage: apiv1.StorageConfiguration{
+							Size:           "1G",
+							ResizeStrategy: apiv1.StorageResizeStrategyOnline,
+						},
+					},
+				},
+			},
+			Status: apiv1.ClusterStatus{
+				PVCCount: 1,
+			},
+		}
+		clusterNew := clusterOld.DeepCopy()
+		clusterNew.Spec.WalStorage.ResizeStrategy = apiv1.StorageResizeStrategyOffline
+		clusterNew.Spec.Tablespaces[0].Storage.ResizeStrategy = apiv1.StorageResizeStrategyOffline
+
+		Expect(v.validateWalStorageChange(clusterNew, clusterOld)).To(HaveLen(1))
+		Expect(v.validateTablespacesChange(clusterNew, clusterOld)).To(HaveLen(1))
+	})
 })
 
 var _ = Describe("Cluster name validation", func() {

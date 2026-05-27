@@ -489,7 +489,12 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	if res, err := r.ensureNoFailoverOnFullDisk(ctx, cluster, instancesStatus); err != nil || !res.IsZero() {
+	if res, err := r.ensureNoFailoverOnFullDisk(
+		ctx,
+		cluster,
+		instancesStatus,
+		resources.pvcs.Items,
+	); err != nil || !res.IsZero() {
 		return res, err
 	}
 
@@ -658,11 +663,20 @@ func (r *ClusterReconciler) ensureNoFailoverOnFullDisk(
 	ctx context.Context,
 	cluster *apiv1.Cluster,
 	instances postgres.PostgresqlStatusList,
+	pvcs []corev1.PersistentVolumeClaim,
 ) (ctrl.Result, error) {
 	contextLogger := log.FromContext(ctx).WithName("ensure_sufficient_disk_space")
 
 	var instanceNames []string
 	for _, state := range instances.Items {
+		if canIgnoreFullDiskDuringOfflineResize(cluster, state, instances, pvcs) {
+			contextLogger.Info(
+				"Insufficient disk space detected in a pod waiting for offline PVC resize, continuing reconciliation",
+				"pod", state.Pod.Name,
+			)
+			continue
+		}
+
 		if !isWALSpaceAvailableOnPod(state.Pod) {
 			instanceNames = append(instanceNames, state.Pod.Name)
 		}
@@ -1087,6 +1101,10 @@ func (r *ClusterReconciler) reconcilePods(
 	// deleted even when they can't report their status (e.g., postgres process
 	// not running, startup probe failing).
 	if res, err := r.reconcileUnrecoverableInstances(ctx, cluster, resources); !res.IsZero() || err != nil {
+		return res, err
+	}
+
+	if res, err := r.reconcileOfflinePVCResize(ctx, cluster, resources, instancesStatus); !res.IsZero() || err != nil {
 		return res, err
 	}
 

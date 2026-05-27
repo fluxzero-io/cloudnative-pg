@@ -68,6 +68,9 @@ const (
 	// INFO: https://kubernetes.io/blog/2018/07/12/resizing-persistent-volumes-using-kubernetes/
 	resizing status = "resizing"
 
+	// List of PVCs waiting for offline controller-side expansion.
+	offlineResizing status = "offlineResizing"
+
 	// List of PVCs that are dangling (they don't have a corresponding Job nor a corresponding Pod)
 	dangling status = "dangling"
 
@@ -268,6 +271,14 @@ func classifyPVC(
 			return resizing
 		}
 		return healthy
+	}
+
+	if IsOfflineResizePending(cluster, pvc) {
+		log.FromContext(ctx).Info("PVC resizing without a pod, waiting for offline expansion",
+			"pvc", pvc.Name,
+			"requested", pvc.Spec.Resources.Requests.Storage(),
+			"capacity", pvc.Status.Capacity.Storage())
+		return offlineResizing
 	}
 
 	// A resizing PVC without a pod must be classified as dangling so the

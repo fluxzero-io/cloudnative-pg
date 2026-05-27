@@ -274,6 +274,49 @@ doesn't support that, you must delete the pod to trigger the resize.
 The best way to proceed is to delete one pod at a time, starting from replicas
 and waiting for each pod to be back up.
 
+For storage classes that support expansion but require the volume to be
+detached before controller-side expansion can complete, set
+`resizeStrategy: offline` on the relevant storage configuration. With this
+strategy, the operator patches the PVC request as usual, stops instances one at
+a time starting from replicas, and doesn't recreate a pod while controller-side
+volume expansion is still pending.
+When Kubernetes reports `FileSystemResizePending`, the operator can recreate
+the pod so kubelet can complete the filesystem resize. After at least one
+resized replica is healthy, the operator switches primary to a resized replica
+before stopping the former primary, unless `primaryUpdateStrategy` is set to
+`supervised`, in which case it waits for the user to request the switchover.
+
+The `resizeStrategy` field is part of each storage configuration. When WAL
+storage and tablespaces are not configured separately, they are stored in
+`PGDATA` and follow `spec.storage`. When they use separate PVCs, configure the
+same strategy on `spec.walStorage` and `spec.tablespaces[].storage` if those
+volumes also require offline expansion. Choose the strategy before the cluster
+creates PVCs; the strategy cannot be changed after PVCs exist.
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgresql-storage-class
+spec:
+  instances: 3
+  storage:
+    size: 2Gi
+    resizeStrategy: offline
+  walStorage:
+    size: 2Gi
+    resizeStrategy: offline
+  tablespaces:
+    - name: archive
+      storage:
+        size: 2Gi
+        resizeStrategy: offline
+```
+
+Single-instance clusters can also use offline resizing, but the instance is
+stopped until controller-side volume expansion has completed and the pod can
+be created again.
+
 ### Re-creating storage
 
 If the storage class doesn't support volume expansion, you can still regenerate

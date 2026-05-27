@@ -344,6 +344,22 @@ var _ = Describe("resize in use volumes", func() {
 	})
 })
 
+var _ = Describe("storage resize strategy", func() {
+	It("defaults to online", func() {
+		storage := StorageConfiguration{}
+		Expect(storage.GetResizeStrategy()).To(Equal(StorageResizeStrategyOnline))
+		Expect(storage.UsesOfflineResizeStrategy()).To(BeFalse())
+	})
+
+	It("detects offline strategy", func() {
+		storage := StorageConfiguration{
+			ResizeStrategy: StorageResizeStrategyOffline,
+		}
+		Expect(storage.GetResizeStrategy()).To(Equal(StorageResizeStrategyOffline))
+		Expect(storage.UsesOfflineResizeStrategy()).To(BeTrue())
+	})
+})
+
 var _ = Describe("external cluster list", func() {
 	emptyCluster := &Cluster{}
 	cluster := Cluster{
