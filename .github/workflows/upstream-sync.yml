@@ -1,0 +1,215 @@
+name: upstream-sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream ref to merge"
+        required: true
+        default: "main"
+      target_branch:
+        description: "Fork branch to sync"
+        required: true
+        default: "main"
+      auto_merge:
+        description: "Enable auto-merge on the sync PR"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync-${{ inputs.target_branch || 'main' }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: cloudnative-pg/cloudnative-pg
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+  TARGET_BRANCH: ${{ inputs.target_branch || 'main' }}
+  SYNC_BRANCH: automation/upstream-sync
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sync:
+    name: Create upstream sync PR
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create Fluxzero Bot installation token
+        id: app-token
+        env:
+          APP_ID: ${{ secrets.FLUXZERO_BOT_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.FLUXZERO_BOT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${APP_ID}" || -z "${APP_PRIVATE_KEY}" ]]; then
+            echo "::error::Configure FLUXZERO_BOT_APP_ID and FLUXZERO_BOT_PRIVATE_KEY repository or organization secrets for Fluxzero Bot."
+            exit 1
+          fi
+
+          base64url() {
+            openssl base64 -A | tr '+/' '-_' | tr -d '='
+          }
+
+          now="$(date +%s)"
+          iat="$((now - 60))"
+          exp="$((now + 540))"
+          header="$(printf '{"alg":"RS256","typ":"JWT"}' | base64url)"
+          payload="$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "${iat}" "${exp}" "${APP_ID}" | base64url)"
+
+          key_file="$(mktemp)"
+          trap 'rm -f "${key_file}"' EXIT
+          printf '%s' "${APP_PRIVATE_KEY}" > "${key_file}"
+
+          signature="$(printf '%s.%s' "${header}" "${payload}" \
+            | openssl dgst -sha256 -sign "${key_file}" -binary \
+            | base64url)"
+          jwt="${header}.${payload}.${signature}"
+
+          github_api() {
+            curl --fail-with-body --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$@"
+          }
+
+          installation_id="$(github_api \
+            --header "Authorization: Bearer ${jwt}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/installation" \
+            | jq -r '.id')"
+
+          if [[ -z "${installation_id}" || "${installation_id}" == "null" ]]; then
+            echo "::error::Could not find a Fluxzero Bot installation for ${GITHUB_REPOSITORY}."
+            exit 1
+          fi
+
+          token="$(github_api \
+            --request POST \
+            --header "Authorization: Bearer ${jwt}" \
+            "https://api.github.com/app/installations/${installation_id}/access_tokens" \
+            | jq -r '.token')"
+
+          if [[ -z "${token}" || "${token}" == "null" ]]; then
+            echo "::error::Could not create a Fluxzero Bot installation token."
+            exit 1
+          fi
+
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout fork
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Install Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Configure git
+        run: |
+          git config user.name "cloudnative-pg fork sync"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        id: upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --tags origin "${TARGET_BRANCH}"
+          git fetch --tags upstream "${UPSTREAM_REF}:refs/remotes/upstream/${UPSTREAM_REF}"
+
+          upstream_sha="$(git rev-parse "refs/remotes/upstream/${UPSTREAM_REF}")"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "${upstream_sha}" HEAD; then
+            echo "synced=true" >> "$GITHUB_OUTPUT"
+            echo "Fork ${TARGET_BRANCH} already contains upstream ${UPSTREAM_REF} (${upstream_sha})."
+            exit 0
+          fi
+
+          echo "synced=false" >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream
+        if: steps.upstream.outputs.synced != 'true'
+        run: |
+          git switch -C "${SYNC_BRANCH}" "origin/${TARGET_BRANCH}"
+          git merge --no-ff --no-edit "refs/remotes/upstream/${UPSTREAM_REF}"
+
+      - name: Regenerate manifests
+        if: steps.upstream.outputs.synced != 'true'
+        run: |
+          make generate manifests
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "chore: regenerate after upstream sync"
+          fi
+
+      - name: Validate synced branch
+        if: steps.upstream.outputs.synced != 'true'
+        run: |
+          git diff --check
+          go test ./api/v1 ./pkg/reconciler/persistentvolumeclaim ./internal/webhook/v1 ./internal/controller
+          go test ./tests/e2e -run '^$'
+
+      - name: Push sync branch
+        if: steps.upstream.outputs.synced != 'true'
+        run: |
+          git push --force-with-lease origin "${SYNC_BRANCH}"
+
+      - name: Create or update sync PR
+        if: steps.upstream.outputs.synced != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.upstream_sha }}
+          AUTO_MERGE: ${{ inputs.auto_merge || false }}
+        run: |
+          title="chore: sync ${TARGET_BRANCH} with upstream/${UPSTREAM_REF}"
+          body="$(cat <<EOF
+          Automated sync of \`${TARGET_BRANCH}\` with \`${UPSTREAM_REPOSITORY}@${UPSTREAM_REF}\`.
+
+          Upstream commit: \`${UPSTREAM_SHA}\`
+
+          This branch was validated with:
+          - \`make generate manifests\`
+          - \`git diff --check\`
+          - \`go test ./api/v1 ./pkg/reconciler/persistentvolumeclaim ./internal/webhook/v1 ./internal/controller\`
+          - \`go test ./tests/e2e -run '^$'\`
+          EOF
+          )"
+
+          pr_number="$(gh pr list \
+            --head "${SYNC_BRANCH}" \
+            --base "${TARGET_BRANCH}" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [[ -z "${pr_number}" ]]; then
+            pr_url="$(gh pr create \
+              --base "${TARGET_BRANCH}" \
+              --head "${SYNC_BRANCH}" \
+              --title "${title}" \
+              --body "${body}")"
+            pr_number="${pr_url##*/}"
+          else
+            gh pr edit "${pr_number}" \
+              --title "${title}" \
+              --body "${body}" \
+              --base "${TARGET_BRANCH}"
+          fi
+
+          if [[ "${AUTO_MERGE}" == "true" ]]; then
+            gh pr merge "${pr_number}" --auto --merge
+          fi

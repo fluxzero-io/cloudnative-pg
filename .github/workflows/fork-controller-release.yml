@@ -1,0 +1,206 @@
+name: fork-controller-release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Rolling image tag to publish"
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: fork-controller-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: cloudnative-pg
+  PLATFORMS: linux/amd64,linux/arm64
+  BUILD_MANAGER_RELEASE_ARGS: build --skip=validate --clean --id manager
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Build and publish controller
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build metadata
+        id: meta
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          git remote add upstream https://github.com/cloudnative-pg/cloudnative-pg.git || true
+          git fetch --tags upstream main:refs/remotes/upstream/main
+
+          commit_sha="$(git rev-parse HEAD)"
+          commit_short="$(git rev-parse --short=12 HEAD)"
+          commit_date="$(git log -1 --pretty=format:'%ad' --date short "${commit_sha}")"
+          base_version="$(git describe --tags --match 'v*' "${commit_sha}" | sed -e 's/^v//; s/-g[0-9a-f]\+$//; s/-\([0-9]\+\)$/-dev\1/')"
+          fork_version="${base_version}-flux.${GITHUB_RUN_NUMBER}"
+          image_tag="${INPUT_IMAGE_TAG:-main}"
+          upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
+          upstream_short="$(git rev-parse --short=12 refs/remotes/upstream/main)"
+          repo_owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image_base="${REGISTRY}/${repo_owner}/${IMAGE_NAME}"
+
+          echo "DATE=${commit_date}" >> "$GITHUB_ENV"
+          echo "VERSION=${fork_version}" >> "$GITHUB_ENV"
+          echo "COMMIT=${commit_short}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${image_tag}" >> "$GITHUB_ENV"
+          echo "REPO_OWNER=${repo_owner}" >> "$GITHUB_ENV"
+          echo "IMAGE_BASE=${image_base}" >> "$GITHUB_ENV"
+          echo "UPSTREAM_SHA=${upstream_sha}" >> "$GITHUB_ENV"
+          echo "UPSTREAM_SHORT=${upstream_short}" >> "$GITHUB_ENV"
+          echo "GOPATH=$(go env GOPATH)" >> "$GITHUB_ENV"
+          echo "PWD=$(pwd)" >> "$GITHUB_ENV"
+
+          echo "commit_short=${commit_short}" >> "$GITHUB_OUTPUT"
+          echo "image_base=${image_base}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+          echo "upstream_short=${upstream_short}" >> "$GITHUB_OUTPUT"
+
+      - name: Better release checks
+        run: |
+          make generate manifests
+          if ! git diff --exit-code; then
+            echo "::error::make generate manifests produced changes. Commit generated files before releasing."
+            git diff --stat
+            exit 1
+          fi
+
+          git diff --check
+          go test ./api/v1 ./pkg/reconciler/persistentvolumeclaim ./internal/webhook/v1 ./internal/controller
+          go test ./tests/e2e -run '^$'
+
+      - name: Run GoReleaser for manager binaries
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7
+        with:
+          distribution: goreleaser
+          version: v2
+          args: ${{ env.BUILD_MANAGER_RELEASE_ARGS }}
+        env:
+          DATE: ${{ env.DATE }}
+          COMMIT: ${{ env.COMMIT }}
+          VERSION: ${{ env.VERSION }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4
+        with:
+          platforms: ${{ env.PLATFORMS }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push controller images
+        id: bake-push
+        uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7
+        env:
+          BUILDX_METADATA_PROVENANCE: disabled
+          environment: production
+          buildVersion: ${{ env.VERSION }}
+          tag: ${{ env.IMAGE_TAG }}
+          registry: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}
+          revision: ${{ env.COMMIT }}
+          latest: "false"
+        with:
+          source: .
+          push: true
+          no-cache: true
+          targets: default
+
+      - name: Publish immutable tags
+        env:
+          BAKE_METADATA: ${{ steps.bake-push.outputs.metadata }}
+        run: |
+          distroless_digest="$(jq -r '.distroless["containerimage.digest"]' <<< "${BAKE_METADATA}")"
+          ubi_digest="$(jq -r '.ubi["containerimage.digest"]' <<< "${BAKE_METADATA}")"
+
+          echo "DISTROLESS_DIGEST=${distroless_digest}" >> "$GITHUB_ENV"
+          echo "UBI_DIGEST=${ubi_digest}" >> "$GITHUB_ENV"
+
+          docker buildx imagetools create \
+            -t "${IMAGE_BASE}:sha-${COMMIT}" \
+            -t "${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}" \
+            "${IMAGE_BASE}@${distroless_digest}"
+
+          docker buildx imagetools create \
+            -t "${IMAGE_BASE}:sha-${COMMIT}-ubi9" \
+            -t "${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}-ubi9" \
+            "${IMAGE_BASE}@${ubi_digest}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign controller images
+        run: |
+          cosign sign --yes \
+            "${IMAGE_BASE}@${DISTROLESS_DIGEST}" \
+            "${IMAGE_BASE}@${UBI_DIGEST}"
+
+      - name: Generate digest-pinned operator manifest
+        env:
+          CONTROLLER_IMG: ${{ env.IMAGE_BASE }}:${{ env.IMAGE_TAG }}
+          CONTROLLER_IMG_DIGEST: ${{ env.DISTROLESS_DIGEST }}
+        run: |
+          make generate-manifest
+          cat > dist/fork-controller-release.txt <<EOF
+          image=${CONTROLLER_IMG}@${CONTROLLER_IMG_DIGEST}
+          image_ubi=${IMAGE_BASE}:${IMAGE_TAG}-ubi9@${UBI_DIGEST}
+          image_sha_tag=${IMAGE_BASE}:sha-${COMMIT}
+          image_upstream_tag=${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}
+          version=${VERSION}
+          commit=${GITHUB_SHA}
+          upstream=${UPSTREAM_SHA}
+          EOF
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fork-controller-release
+          path: |
+            dist/operator-manifest.yaml
+            dist/fork-controller-release.txt
+          retention-days: 30
+
+      - name: Release summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Fork controller release
+
+          Published:
+          - \`${IMAGE_BASE}:${IMAGE_TAG}@${DISTROLESS_DIGEST}\`
+          - \`${IMAGE_BASE}:${IMAGE_TAG}-ubi9@${UBI_DIGEST}\`
+          - \`${IMAGE_BASE}:sha-${COMMIT}\`
+          - \`${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}\`
+
+          The digest-pinned install manifest is attached as the \`fork-controller-release\` artifact.
+          EOF
