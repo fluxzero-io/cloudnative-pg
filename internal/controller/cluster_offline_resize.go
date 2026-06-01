@@ -40,7 +40,8 @@ const (
 	phaseOfflinePVCResize        = "Offline PVC resize in progress"
 	phaseOfflinePVCResizeDelayed = "Offline PVC resize delayed"
 
-	offlinePVCResizeReason = "offline PVC resize requires the instance Pod to be stopped"
+	offlinePVCResizeReason                      = "offline PVC resize requires the instance Pod to be stopped"
+	offlinePVCResizeSwitchoverMaximumLagInBytes = 16 * 1024 * 1024
 )
 
 func (r *ClusterReconciler) reconcileOfflinePVCResize(
@@ -164,7 +165,7 @@ func (r *ClusterReconciler) reconcilePrimaryOfflineResize(
 		return ctrl.Result{}, ErrNextLoop
 	}
 
-	target := findOfflineResizeSwitchoverTarget(cluster, instancesStatus, primaryStatus.Pod.Name, pvcs)
+	target := findOfflineResizeSwitchoverTarget(cluster, instancesStatus, primaryStatus, pvcs)
 	if target == nil {
 		log.FromContext(ctx).Info(
 			"Waiting for a healthy resized replica before stopping the primary for offline PVC resize",
@@ -270,7 +271,7 @@ func canIgnoreFullDiskDuringOfflineResize(
 		return true
 	}
 
-	return findOfflineResizeSwitchoverTarget(cluster, instances, status.Pod.Name, pvcs) != nil
+	return findOfflineResizeSwitchoverTarget(cluster, instances, &status, pvcs) != nil
 }
 
 func getCurrentPrimaryStatus(
@@ -303,19 +304,20 @@ func isPodReportingReady(instancesStatus postgres.PostgresqlStatusList, podName 
 func findOfflineResizeSwitchoverTarget(
 	cluster *apiv1.Cluster,
 	podList postgres.PostgresqlStatusList,
-	primaryPodName string,
+	primaryStatus *postgres.PostgresqlStatus,
 	pvcs []corev1.PersistentVolumeClaim,
 ) *postgres.PostgresqlStatus {
 	for idx := range podList.Items {
 		candidate := &podList.Items[idx]
-		if candidate.Pod == nil || candidate.Pod.Name == primaryPodName {
+		if candidate.Pod == nil || isPrimaryStatus(candidate, primaryStatus) {
 			continue
 		}
 
 		if cluster.IsInstanceFenced(candidate.Pod.Name) ||
-			!candidate.IsPodReady ||
+			!candidate.HasHTTPStatus() ||
 			candidate.MightBeUnavailable ||
 			!candidate.IsWalReceiverActive ||
+			!hasAcceptableOfflineResizeSwitchoverLag(candidate, primaryStatus) ||
 			persistentvolumeclaim.IsOfflineResizePendingForPod(cluster, candidate.Pod, pvcs) {
 			continue
 		}
@@ -324,4 +326,47 @@ func findOfflineResizeSwitchoverTarget(
 	}
 
 	return nil
+}
+
+func isPrimaryStatus(candidate, primaryStatus *postgres.PostgresqlStatus) bool {
+	return primaryStatus != nil &&
+		primaryStatus.Pod != nil &&
+		candidate.Pod.Name == primaryStatus.Pod.Name
+}
+
+func hasAcceptableOfflineResizeSwitchoverLag(
+	candidate *postgres.PostgresqlStatus,
+	primaryStatus *postgres.PostgresqlStatus,
+) bool {
+	if candidate.ReceivedLsn == "" || candidate.ReplayLsn == "" {
+		return false
+	}
+
+	receivedLsn, err := candidate.ReceivedLsn.Parse()
+	if err != nil {
+		return false
+	}
+	replayLsn, err := candidate.ReplayLsn.Parse()
+	if err != nil {
+		return false
+	}
+	if replayLsn > receivedLsn {
+		receivedLsn = replayLsn
+	}
+	if receivedLsn-replayLsn > offlinePVCResizeSwitchoverMaximumLagInBytes {
+		return false
+	}
+
+	if primaryStatus == nil || primaryStatus.CurrentLsn == "" {
+		return true
+	}
+
+	currentLsn, err := primaryStatus.CurrentLsn.Parse()
+	if err != nil {
+		return false
+	}
+	if replayLsn > currentLsn {
+		return true
+	}
+	return currentLsn-replayLsn <= offlinePVCResizeSwitchoverMaximumLagInBytes
 }

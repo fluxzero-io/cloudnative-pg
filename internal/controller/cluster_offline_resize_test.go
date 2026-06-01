@@ -366,14 +366,21 @@ var _ = Describe("Offline PVC resize controller", func() {
 		Expect(k8sClient.Get(ctx, k8client.ObjectKeyFromObject(replicaPod), &corev1.Pod{})).To(Succeed())
 	})
 
-	It("switches primary to a healthy resized replica before resizing the former primary", func(ctx SpecContext) {
+	It("switches primary to a caught-up streaming replica before resizing the former primary", func(ctx SpecContext) {
 		cluster := createOfflineResizeCluster(2)
 		primaryPod := buildResizePod(cluster, 1)
 		replicaPod := buildResizePod(cluster, 2)
 		podList := &postgres.PostgresqlStatusList{
 			Items: []postgres.PostgresqlStatus{
-				{Pod: primaryPod, IsPrimary: true, IsPodReady: true, ExecutableHash: "hash"},
-				{Pod: replicaPod, IsPodReady: true, ExecutableHash: "hash", IsWalReceiverActive: true},
+				{Pod: primaryPod, IsPrimary: true, IsPodReady: true, ExecutableHash: "hash", CurrentLsn: "0/2000000"},
+				{
+					Pod:                 replicaPod,
+					IsPodReady:          false,
+					ExecutableHash:      "hash",
+					IsWalReceiverActive: true,
+					ReceivedLsn:         "0/2000000",
+					ReplayLsn:           "0/2000000",
+				},
 			},
 		}
 		pvcs := []corev1.PersistentVolumeClaim{
@@ -409,8 +416,17 @@ var _ = Describe("Offline PVC resize controller", func() {
 					MightBeUnavailable:  true,
 					ExecutableHash:      "hash",
 					IsWalReceiverActive: true,
+					ReceivedLsn:         "0/2000000",
+					ReplayLsn:           "0/2000000",
 				},
-				{Pod: healthyReplicaPod, IsPodReady: true, ExecutableHash: "hash", IsWalReceiverActive: true},
+				{
+					Pod:                 healthyReplicaPod,
+					IsPodReady:          true,
+					ExecutableHash:      "hash",
+					IsWalReceiverActive: true,
+					ReceivedLsn:         "0/2000000",
+					ReplayLsn:           "0/2000000",
+				},
 			},
 		}
 		pvcs := []corev1.PersistentVolumeClaim{
@@ -481,6 +497,41 @@ var _ = Describe("Offline PVC resize controller", func() {
 			Items: []postgres.PostgresqlStatus{
 				{Pod: primaryPod, IsPrimary: true, IsPodReady: true, ExecutableHash: "hash"},
 				{Pod: replicaPod, IsPodReady: true, ExecutableHash: "hash", IsWalReceiverActive: false},
+			},
+		}
+		pvcs := []corev1.PersistentVolumeClaim{
+			buildResizePVC(cluster, 1, "1Gi"),
+			buildResizePVC(cluster, 2, "2Gi"),
+		}
+
+		result, err := reconciler.reconcileOfflinePVCResize(
+			ctx,
+			cluster,
+			buildOfflineResizeResources(pvcs, primaryPod, replicaPod),
+			*podList,
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(5 * time.Second))
+		Expect(k8sClient.Get(ctx, k8client.ObjectKeyFromObject(primaryPod), &corev1.Pod{})).To(Succeed())
+	})
+
+	It("does not stop the primary when the resized replica is too far behind", func(ctx SpecContext) {
+		cluster := createOfflineResizeCluster(2)
+		primaryPod := buildResizePod(cluster, 1)
+		replicaPod := buildResizePod(cluster, 2)
+		Expect(k8sClient.Create(ctx, primaryPod)).To(Succeed())
+		Expect(k8sClient.Create(ctx, replicaPod)).To(Succeed())
+		podList := &postgres.PostgresqlStatusList{
+			Items: []postgres.PostgresqlStatus{
+				{Pod: primaryPod, IsPrimary: true, IsPodReady: true, ExecutableHash: "hash", CurrentLsn: "0/3000000"},
+				{
+					Pod:                 replicaPod,
+					IsPodReady:          true,
+					ExecutableHash:      "hash",
+					IsWalReceiverActive: true,
+					ReceivedLsn:         "0/3000000",
+					ReplayLsn:           "0/1000000",
+				},
 			},
 		}
 		pvcs := []corev1.PersistentVolumeClaim{

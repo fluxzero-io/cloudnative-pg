@@ -516,6 +516,8 @@ var _ = Describe("Updating target primary", func() {
 					{
 						IsPodReady:          true,
 						IsWalReceiverActive: true,
+						ReceivedLsn:         "0/3000000",
+						ReplayLsn:           "0/1000000",
 						Pod:                 &instances[1],
 					},
 				},
@@ -572,6 +574,8 @@ var _ = Describe("Updating target primary", func() {
 					{
 						IsPodReady:          true,
 						IsWalReceiverActive: true,
+						ReceivedLsn:         "0/2000000",
+						ReplayLsn:           "0/2000000",
 						Pod:                 &instances[1],
 					},
 				},

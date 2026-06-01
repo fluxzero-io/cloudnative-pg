@@ -252,14 +252,12 @@ func (r *ClusterReconciler) updateResourceStatus(
 	if cluster.Status.TargetPrimary != cluster.Status.CurrentPrimary &&
 		cluster.Status.CurrentPrimary != "" {
 		found := false
-		if cluster.Status.ReadyInstances > 0 {
-			for _, instance := range utils.FilterActivePods(resources.instances.Items) {
-				// If the target primary is not active, it will never be promoted
-				// since is will not be scheduled anymore
-				if instance.Name == cluster.Status.TargetPrimary {
-					found = true
-					break
-				}
+		for _, instance := range utils.FilterActivePods(resources.instances.Items) {
+			// If the target primary is not active, it will never be promoted
+			// since is will not be scheduled anymore
+			if instance.Name == cluster.Status.TargetPrimary {
+				found = true
+				break
 			}
 		}
 
