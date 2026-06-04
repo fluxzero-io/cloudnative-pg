@@ -1779,7 +1779,7 @@ func validateStorageConfigurationChange(
 	oldStorage apiv1.StorageConfiguration,
 	newStorage apiv1.StorageConfiguration,
 ) field.ErrorList {
-	var result field.ErrorList
+	result := make(field.ErrorList, 0, 1)
 
 	oldSize := oldStorage.GetSizeOrNil()
 	if oldSize == nil {

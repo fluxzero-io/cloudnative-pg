@@ -54,7 +54,12 @@ func (r *ClusterReconciler) reconcileOfflinePVCResize(
 		return ctrl.Result{}, nil
 	}
 
-	if res, err := r.reconcileNonReadyOfflineResizePod(ctx, cluster, resources, instancesStatus); !res.IsZero() || err != nil {
+	if res, err := r.reconcileNonReadyOfflineResizePod(
+		ctx,
+		cluster,
+		resources,
+		instancesStatus,
+	); !res.IsZero() || err != nil {
 		return res, err
 	}
 
@@ -66,7 +71,12 @@ func (r *ClusterReconciler) reconcileOfflinePVCResize(
 		return ctrl.Result{}, nil
 	}
 
-	if res, err := r.reconcileReadyOfflineResizeReplica(ctx, cluster, resources.pvcs.Items, instancesStatus); !res.IsZero() || err != nil {
+	if res, err := r.reconcileReadyOfflineResizeReplica(
+		ctx,
+		cluster,
+		resources.pvcs.Items,
+		instancesStatus,
+	); !res.IsZero() || err != nil {
 		return res, err
 	}
 

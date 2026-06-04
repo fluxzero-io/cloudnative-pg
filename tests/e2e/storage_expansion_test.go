@@ -24,12 +24,6 @@ import (
 	"os"
 	"strings"
 
-	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
-	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/persistentvolumeclaim"
-	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
-	"github.com/cloudnative-pg/cloudnative-pg/tests"
-	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/run"
-	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/storage"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +31,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/persistentvolumeclaim"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
+	"github.com/cloudnative-pg/cloudnative-pg/tests"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/run"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/storage"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -220,7 +221,10 @@ var _ = Describe("Verify storage", Label(tests.LabelStorage), func() {
 				}, 300, 2).Should(Succeed())
 			})
 
-			expandedInstances := completeDetachedOfflineResizes(namespace, offlineResizeSingleInstance*offlineResizeSinglePVCsPerInstance)
+			expandedInstances := completeDetachedOfflineResizes(
+				namespace,
+				offlineResizeSingleInstance*offlineResizeSinglePVCsPerInstance,
+			)
 			Expect(expandedInstances).To(Equal([]string{initialPrimary}))
 
 			AssertClusterIsReady(namespace, offlineResizeSingleClusterName, 600, env)

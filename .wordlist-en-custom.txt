@@ -514,6 +514,9 @@ StartupProbe
 StatefulSets
 StorageClass
 StorageConfiguration
+StorageResizeStrategy
+StorageResizeStrategyOffline
+StorageResizeStrategyOnline
 Storages
 SubscriptionReclaimDelete
 SubscriptionReclaimPolicy
@@ -1248,6 +1251,7 @@ podName
 podSecurityContext
 podSelectorRefs
 podStatuses
+podless
 podmonitor
 podname
 podselector
@@ -1494,6 +1498,7 @@ storageSasToken
 storageclass
 storageclasses
 storageconfiguration
+storageresizestrategy
 strflocaltime
 subcommand
 subcommands

@@ -1057,6 +1057,8 @@ func (r *ClusterReconciler) processUnschedulableInstances(
 }
 
 // reconcilePods decides when to create, scale up/down or wait for pods
+//
+//nolint:gocognit
 func (r *ClusterReconciler) reconcilePods(
 	ctx context.Context,
 	cluster *apiv1.Cluster,

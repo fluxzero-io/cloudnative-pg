@@ -102,9 +102,9 @@ var _ = Describe("PVC classification with resizing PVCs", func() {
 		cluster.Spec.StorageConfiguration.ResizeStrategy = apiv1.StorageResizeStrategyOffline
 		return cluster
 	}
-	setPVCStorage := func(pvc *corev1.PersistentVolumeClaim, requested, capacity string) {
+	setPVCStorage := func(pvc *corev1.PersistentVolumeClaim, capacity string) {
 		pvc.Spec.Resources.Requests = corev1.ResourceList{
-			corev1.ResourceStorage: resource.MustParse(requested),
+			corev1.ResourceStorage: resource.MustParse("2Gi"),
 		}
 		pvc.Status.Capacity = corev1.ResourceList{
 			corev1.ResourceStorage: resource.MustParse(capacity),
@@ -132,7 +132,7 @@ var _ = Describe("PVC classification with resizing PVCs", func() {
 
 	It("classifies an offline podless undersized PVC as offline resizing", func(ctx SpecContext) {
 		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
-		setPVCStorage(&pvc, "2Gi", "1Gi")
+		setPVCStorage(&pvc, "1Gi")
 		cluster := makeOfflineCluster()
 		EnrichStatus(ctx, cluster, []corev1.Pod{}, []batchv1.Job{}, []corev1.PersistentVolumeClaim{pvc})
 		Expect(IsOfflineResizePending(cluster, pvc)).To(BeTrue())
@@ -142,7 +142,7 @@ var _ = Describe("PVC classification with resizing PVCs", func() {
 
 	It("allows pod recreation for offline resize once capacity reaches the request", func(ctx SpecContext) {
 		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
-		setPVCStorage(&pvc, "2Gi", "2Gi")
+		setPVCStorage(&pvc, "2Gi")
 		cluster := makeOfflineCluster()
 		EnrichStatus(ctx, cluster, []corev1.Pod{}, []batchv1.Job{}, []corev1.PersistentVolumeClaim{pvc})
 		Expect(cluster.Status.DanglingPVC).Should(Equal([]string{clusterName + "-1"}))
@@ -151,7 +151,7 @@ var _ = Describe("PVC classification with resizing PVCs", func() {
 
 	It("allows FileSystemResizePending PVC recreation after offline capacity expansion", func(ctx SpecContext) {
 		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
-		setPVCStorage(&pvc, "2Gi", "2Gi")
+		setPVCStorage(&pvc, "2Gi")
 		pvc.Status.Conditions = append(pvc.Status.Conditions, corev1.PersistentVolumeClaimCondition{
 			Type: corev1.PersistentVolumeClaimFileSystemResizePending, Status: corev1.ConditionTrue,
 		})
@@ -163,7 +163,7 @@ var _ = Describe("PVC classification with resizing PVCs", func() {
 
 	It("allows FileSystemResizePending PVC recreation before PVC status capacity catches up", func(ctx SpecContext) {
 		pvc := makePVC(clusterName, "1", "1", NewPgDataCalculator(), true)
-		setPVCStorage(&pvc, "2Gi", "1Gi")
+		setPVCStorage(&pvc, "1Gi")
 		pvc.Status.Conditions = append(pvc.Status.Conditions, corev1.PersistentVolumeClaimCondition{
 			Type: corev1.PersistentVolumeClaimFileSystemResizePending, Status: corev1.ConditionTrue,
 		})

@@ -303,7 +303,7 @@ apidoc: crd-ref-docs ## Update the API Reference section of the documentation.
 		--templates-dir docs/crd-gen-refs/markdown \
 		--output-path docs/src/cloudnative-pg.v1.md
 	@echo "Escaping Markdown directives in generated API documentation..."
-	sed -i 's/:map\[\([^]]*\)\]/\\: \\{ \1 \\}/g' docs/src/cloudnative-pg.v1.md
+	perl -0pi -e 's/:map\[([^]]*)\]/\\: \\{ $$1 \\}/g; s/\n+\z/\n/' docs/src/cloudnative-pg.v1.md
 
 ##@ Cleanup
 
