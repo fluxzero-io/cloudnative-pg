@@ -2828,7 +2828,7 @@ _Appears in:_
 | `storageClass` _string_ | StorageClass to use for PVCs. Applied after<br />evaluating the PVC template, if available.<br />If not specified, the generated PVCs will use the<br />default storage class |  |  |  |
 | `size` _string_ | Size of the storage. Required if not already specified in the PVC template.<br />Changes to this field are automatically reapplied to the created PVCs.<br />Size cannot be decreased. |  |  |  |
 | `resizeInUseVolumes` _boolean_ | Resize existent PVCs, defaults to true |  | true |  |
-| `resizeStrategy` _[StorageResizeStrategy](#storageresizestrategy)_ | Strategy used by the operator to orchestrate PVC expansion.<br />The default value is online, which preserves the existing behavior.<br />The offline strategy keeps a podless PVC detached while controller-side volume<br />expansion is still pending.<br />This value cannot be changed after PVCs have been created. |  | online | Enum: [online offline] <br /> |
+| `resizeStrategy` _[StorageResizeStrategy](#storageresizestrategy)_ | Strategy used by the operator to orchestrate PVC expansion.<br />The default value is online, which preserves the existing behavior.<br />The offline strategy keeps a podless PVC detached while controller-side volume<br />expansion is still pending.<br />Changes affect future resize reconciliation. |  | online | Enum: [online offline] <br /> |
 | `pvcTemplate` _[PersistentVolumeClaimSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#persistentvolumeclaimspec-v1-core)_ | Template to be used to generate the Persistent Volume Claim |  |  |  |
 
 

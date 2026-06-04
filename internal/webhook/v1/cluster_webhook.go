@@ -1713,7 +1713,6 @@ func (v *ClusterCustomValidator) validateStorageChange(r, old *apiv1.Cluster) fi
 		field.NewPath("spec", "storage"),
 		old.Spec.StorageConfiguration,
 		r.Spec.StorageConfiguration,
-		old.Status.PVCCount > 0,
 	)
 }
 
@@ -1735,7 +1734,6 @@ func (v *ClusterCustomValidator) validateWalStorageChange(r, old *apiv1.Cluster)
 		field.NewPath("spec", "walStorage"),
 		*old.Spec.WalStorage,
 		*r.Spec.WalStorage,
-		old.Status.PVCCount > 0,
 	)
 }
 
@@ -1763,7 +1761,6 @@ func (v *ClusterCustomValidator) validateTablespacesChange(r, old *apiv1.Cluster
 				field.NewPath("spec", "tablespaces").Index(idx).Child("storage"),
 				oldConf.Storage,
 				newConf.Storage,
-				old.Status.PVCCount > 0,
 			)...)
 		} else {
 			errs = append(errs,
@@ -1781,15 +1778,8 @@ func validateStorageConfigurationChange(
 	structPath *field.Path,
 	oldStorage apiv1.StorageConfiguration,
 	newStorage apiv1.StorageConfiguration,
-	rejectResizeStrategyChange bool,
 ) field.ErrorList {
 	var result field.ErrorList
-	if rejectResizeStrategyChange && oldStorage.GetResizeStrategy() != newStorage.GetResizeStrategy() {
-		result = append(result, field.Invalid(
-			structPath.Child("resizeStrategy"),
-			newStorage.ResizeStrategy,
-			"resizeStrategy cannot be changed after PVCs have been created"))
-	}
 
 	oldSize := oldStorage.GetSizeOrNil()
 	if oldSize == nil {

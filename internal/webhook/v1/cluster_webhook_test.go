@@ -2175,7 +2175,7 @@ var _ = Describe("storage configuration validation", func() {
 		Expect(v.validateStorageChange(clusterNew, clusterOld)).To(BeEmpty())
 	})
 
-	It("rejects changing storage resize strategy after PVCs exist", func() {
+	It("allows changing storage resize strategy after PVCs exist", func() {
 		clusterOld := &apiv1.Cluster{
 			Spec: apiv1.ClusterSpec{
 				StorageConfiguration: apiv1.StorageConfiguration{
@@ -2190,10 +2190,10 @@ var _ = Describe("storage configuration validation", func() {
 		clusterNew := clusterOld.DeepCopy()
 		clusterNew.Spec.StorageConfiguration.ResizeStrategy = apiv1.StorageResizeStrategyOffline
 
-		Expect(v.validateStorageChange(clusterNew, clusterOld)).To(HaveLen(1))
+		Expect(v.validateStorageChange(clusterNew, clusterOld)).To(BeEmpty())
 	})
 
-	It("rejects changing WAL and tablespace resize strategies after PVCs exist", func() {
+	It("allows changing WAL and tablespace resize strategies after PVCs exist", func() {
 		clusterOld := &apiv1.Cluster{
 			Spec: apiv1.ClusterSpec{
 				WalStorage: &apiv1.StorageConfiguration{
@@ -2218,8 +2218,8 @@ var _ = Describe("storage configuration validation", func() {
 		clusterNew.Spec.WalStorage.ResizeStrategy = apiv1.StorageResizeStrategyOffline
 		clusterNew.Spec.Tablespaces[0].Storage.ResizeStrategy = apiv1.StorageResizeStrategyOffline
 
-		Expect(v.validateWalStorageChange(clusterNew, clusterOld)).To(HaveLen(1))
-		Expect(v.validateTablespacesChange(clusterNew, clusterOld)).To(HaveLen(1))
+		Expect(v.validateWalStorageChange(clusterNew, clusterOld)).To(BeEmpty())
+		Expect(v.validateTablespacesChange(clusterNew, clusterOld)).To(BeEmpty())
 	})
 })
 

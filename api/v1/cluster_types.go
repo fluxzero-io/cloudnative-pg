@@ -2182,7 +2182,7 @@ type StorageConfiguration struct {
 	// The default value is online, which preserves the existing behavior.
 	// The offline strategy keeps a podless PVC detached while controller-side volume
 	// expansion is still pending.
-	// This value cannot be changed after PVCs have been created.
+	// Changes affect future resize reconciliation.
 	// +optional
 	// +kubebuilder:default:=online
 	// +kubebuilder:validation:Enum:=online;offline
