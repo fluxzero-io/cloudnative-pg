@@ -119,7 +119,7 @@ jobs:
 
           git diff --check
           go test ./api/v1 ./pkg/reconciler/persistentvolumeclaim ./internal/webhook/v1 ./internal/controller
-          go test ./tests/e2e -run '^$'
+          go -C tests test ./e2e -run '^$'
 
       - name: Run GoReleaser for manager binaries
         uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7

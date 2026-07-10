@@ -22,15 +22,19 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"github.com/cloudnative-pg/machinery/pkg/stringset"
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +57,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/internal/cnpi/plugin/repository"
 	"github.com/cloudnative-pg/cloudnative-pg/internal/configuration"
 	rolloutManager "github.com/cloudnative-pg/cloudnative-pg/internal/controller/rollout"
+	"github.com/cloudnative-pg/cloudnative-pg/internal/webhook/guard"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/certs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/webserver/client/remote"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
@@ -73,6 +78,10 @@ const (
 	poolerClusterKey              = ".spec.cluster.name"
 	disableDefaultQueriesSpecPath = ".spec.monitoring.disableDefaultQueries"
 	imageCatalogKey               = ".spec.imageCatalog.name"
+	databaseRoleClusterKey        = ".spec.cluster.name"
+	// usedPluginsClusterKey is a synthetic index key, not a real Cluster spec field;
+	// it is populated by getPluginsNeededForReconcile.
+	usedPluginsClusterKey = ".spec.usedPlugins"
 )
 
 var apiSGVString = apiv1.SchemeGroupVersion.String()
@@ -86,35 +95,41 @@ var errOldPrimaryDetected = errors.New("old primary detected")
 type ClusterReconciler struct {
 	client.Client
 
-	DiscoveryClient discovery.DiscoveryInterface
-	Scheme          *runtime.Scheme
-	Recorder        record.EventRecorder
-	InstanceClient  remote.InstanceClient
-	Plugins         repository.Interface
+	DiscoveryClient    discovery.DiscoveryInterface
+	Scheme             *runtime.Scheme
+	Recorder           record.EventRecorder
+	InstanceClient     remote.InstanceClient
+	Plugins            repository.Interface
+	OperatorClientCert *tls.Certificate
 
 	drainTaints    []string
 	rolloutManager *rolloutManager.Manager
+	admission      *guard.Admission[*apiv1.Cluster]
 }
 
 // NewClusterReconciler creates a new ClusterReconciler initializing it
 func NewClusterReconciler(
 	mgr manager.Manager,
-	discoveryClient *discovery.DiscoveryClient,
+	discoveryClient discovery.DiscoveryInterface,
 	plugins repository.Interface,
 	drainTaints []string,
+	operatorClientCert *tls.Certificate,
+	admission *guard.Admission[*apiv1.Cluster],
 ) *ClusterReconciler {
 	return &ClusterReconciler{
-		InstanceClient:  remote.NewClient().Instance(),
-		DiscoveryClient: discoveryClient,
-		Client:          operatorclient.NewExtendedClient(mgr.GetClient()),
-		Scheme:          mgr.GetScheme(),
-		Recorder:        mgr.GetEventRecorderFor("cloudnative-pg"), //nolint:staticcheck
-		Plugins:         plugins,
+		InstanceClient:     remote.NewClient().Instance(),
+		DiscoveryClient:    discoveryClient,
+		Client:             operatorclient.NewExtendedClient(mgr.GetClient()),
+		Scheme:             mgr.GetScheme(),
+		Recorder:           mgr.GetEventRecorderFor("cloudnative-pg"), //nolint:staticcheck
+		Plugins:            plugins,
+		OperatorClientCert: operatorClientCert,
 		rolloutManager: rolloutManager.New(
 			configuration.Current.GetClustersRolloutDelay(),
 			configuration.Current.GetInstancesRolloutDelay(),
 		),
 		drainTaints: drainTaints,
+		admission:   admission,
 	}
 }
 
@@ -125,7 +140,8 @@ var ErrNextLoop = utils.ErrNextLoop
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations,verbs=get;patch
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;delete;patch;create;watch
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;create;update
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=podmonitors,verbs=get;create;list;watch;delete;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=create;delete;get;list;watch;update;patch
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
@@ -194,14 +210,21 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
+	if result, err := r.admission.EnsureResourceIsAdmitted(
+		ctx,
+		guard.AdmissionParams[*apiv1.Cluster]{
+			Object:       cluster,
+			Client:       r.Client,
+			ApplyChanges: true,
+		},
+	); !result.IsZero() || err != nil {
+		return result, err
+	}
+
 	ctx = cluster.SetInContext(ctx)
 
 	// Load the plugins required to bootstrap and reconcile this cluster
-	enabledPluginNames := apiv1.GetPluginConfigurationEnabledPluginNames(cluster.Spec.Plugins)
-	enabledPluginNames = append(
-		enabledPluginNames,
-		apiv1.GetExternalClustersEnabledPluginNames(cluster.Spec.ExternalClusters)...,
-	)
+	enabledPluginNames := getPluginsNeededForReconcile(cluster)
 
 	pluginLoadingContext, cancelPluginLoading := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelPluginLoading()
@@ -269,6 +292,18 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return result, nil
 }
 
+// getPluginsNeededForReconcile returns the names of the plugins that must be
+// loaded for the reconciliation loop to interact with this cluster, collected
+// from both the cluster's plugin configuration and its external clusters.
+func getPluginsNeededForReconcile(cluster *apiv1.Cluster) []string {
+	names := apiv1.GetPluginConfigurationEnabledPluginNames(cluster.Spec.Plugins)
+	names = append(
+		names,
+		apiv1.GetExternalClustersEnabledPluginNames(cluster.Spec.ExternalClusters)...,
+	)
+	return stringset.From(names).ToSortedList()
+}
+
 // Inner reconcile loop. Anything inside can require the reconciliation loop to stop by returning ErrNextLoop
 //
 //nolint:gocognit,gocyclo
@@ -298,6 +333,12 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 	err = r.setDefaults(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Ensure the operator's client certificate fingerprint is up to date in the
+	// cluster status before making any authenticated call to the instance manager.
+	if result, err := r.reconcileOperatorCertificateFingerprint(ctx, cluster); err != nil || !result.IsZero() {
+		return result, err
 	}
 
 	// Discover the image to be used and set it into the status
@@ -400,12 +441,13 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
-	// Store in the context the TLS configuration required communicating with the Pods
-	ctx, err = certs.NewTLSConfigForContext(
-		ctx,
-		r.Client,
-		cluster.GetServerCASecretObjectKey(),
-	)
+	// Store in the context the TLS configuration required communicating with the Pods.
+	// The operator client certificate is presented to authenticate with the instance manager.
+	ctx, err = certs.NewTLSConfigForContext(ctx, certs.TLSConfigOptions{
+		Client:     r.Client,
+		CASecret:   cluster.GetServerCASecretObjectKey(),
+		ClientCert: r.OperatorClientCert,
+	})
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -498,10 +540,6 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		return res, err
 	}
 
-	if res, err := r.requireWALArchivingPluginOrDelete(ctx, instancesStatus); err != nil || !res.IsZero() {
-		return res, err
-	}
-
 	if res, err := replicaclusterswitch.Reconcile(
 		ctx, r.Client, cluster, r.InstanceClient, instancesStatus); res != nil || err != nil {
 		if res != nil {
@@ -563,15 +601,9 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		return res, err
 	}
 
-	// Calls post-reconcile hooks
-	if hookResult := postReconcilePluginHooks(ctx, cluster, cluster); hookResult.Err != nil ||
-		!hookResult.Result.IsZero() {
-		contextLogger.Info("Post-reconcile hook stopped the reconciliation loop",
-			"hookResult", hookResult)
-		return hookResult.Result, hookResult.Err
-	}
-
-	return setStatusPluginHook(ctx, r.Client, cnpgiClient.GetPluginClientFromContext(ctx), cluster)
+	// Run plugin post-reconcile hooks, sync per-plugin statuses, and
+	// register PhaseHealthy as the LAST status mutation. See #8582.
+	return r.finalizeReconciliation(ctx, cnpgiClient.GetPluginClientFromContext(ctx), cluster)
 }
 
 // evaluatePodReadinessGuards short-circuits the reconciliation loop with a
@@ -703,30 +735,6 @@ func (r *ClusterReconciler) ensureNoFailoverOnFullDisk(
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-func (r *ClusterReconciler) requireWALArchivingPluginOrDelete(
-	ctx context.Context,
-	instances postgres.PostgresqlStatusList,
-) (ctrl.Result, error) {
-	contextLogger := log.FromContext(ctx).WithName("require_wal_archiving_plugin_delete")
-
-	for _, state := range instances.Items {
-		if isTerminatedBecauseOfMissingWALArchivePlugin(state.Pod) {
-			contextLogger.Warning(
-				"Detected instance manager initialization procedure that failed "+
-					"because the required WAL archive plugin is missing. Deleting it to trigger rollout",
-				"targetPod", state.Pod.Name)
-			if err := r.Delete(ctx, state.Pod); err != nil {
-				contextLogger.Error(err, "Cannot delete the pod", "pod", state.Pod.Name)
-				return ctrl.Result{}, err
-			}
-
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-		}
-	}
-
-	return ctrl.Result{}, nil
-}
-
 func (r *ClusterReconciler) handleSwitchover(
 	ctx context.Context,
 	cluster *apiv1.Cluster,
@@ -851,6 +859,24 @@ func (r *ClusterReconciler) reconcileResources(
 		return *result, err
 	}
 
+	// A Job that creates an instance (bootstrap, recovery or replica creation)
+	// is counted as "running" until it succeeds, so a Job that has exhausted its
+	// backoff limit would otherwise keep the cluster waiting forever. Surface the
+	// failure in the phase instead. The cause is in the job logs and has to be
+	// investigated: there is no predefined recipe.
+	if failedJobs := resources.failedJobNames(); len(failedJobs) > 0 {
+		contextLogger.Warning("An instance creation job has failed", "failedJobs", failedJobs)
+
+		reason := fmt.Sprintf("Instance creation failed for the following jobs: %s. "+
+			"Check the job logs to investigate the cause of the failure.",
+			strings.Join(failedJobs, ", "))
+
+		if err := r.RegisterPhase(ctx, cluster, apiv1.PhaseUnrecoverable, reason); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
 	runningJobs := resources.runningJobNames()
 
 	// Act on Pods and PVCs only if there is nothing that is currently being created or deleted
@@ -937,11 +963,6 @@ func (r *ClusterReconciler) reconcileResources(
 	// PhaseInplacePrimaryRestart will be patched to healthy in instance manager
 	if cluster.Status.Phase == apiv1.PhaseInplacePrimaryRestart {
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, ErrNextLoop
-	}
-
-	// When everything is reconciled, update the status
-	if err := r.RegisterPhase(ctx, cluster, apiv1.PhaseHealthy, ""); err != nil {
-		return ctrl.Result{}, err
 	}
 
 	r.cleanupCompletedJobs(ctx, resources.jobs)
@@ -1120,14 +1141,9 @@ func (r *ClusterReconciler) reconcilePods(
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, ErrNextLoop
 	}
 
-	// Are there missing nodes? Let's create one
-	if cluster.Status.Instances < cluster.Spec.Instances &&
-		instancesStatus.InstancesReportingStatus() == cluster.Status.Instances {
-		newNodeSerial, err := r.generateNodeSerial(ctx, cluster)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("cannot generate node serial: %w", err)
-		}
-		return r.joinReplicaInstance(ctx, newNodeSerial, cluster)
+	// Are there missing instances? Let's create one
+	if res, err := r.reconcileMissingInstance(ctx, cluster, resources, instancesStatus); !res.IsZero() || err != nil {
+		return res, err
 	}
 
 	// Should we scale down the cluster?
@@ -1249,6 +1265,12 @@ func (r *ClusterReconciler) handleRollingUpdate(
 	// Execute online update, if enabled and if not already executing
 	if cluster.Status.OnlineUpdateEnabled && cluster.Status.Phase != apiv1.PhaseOnlineUpgrading {
 		if err := r.upgradeInstanceManager(ctx, cluster, &instancesStatus); err != nil {
+			if remote.IsTransientAuthError(err) {
+				contextLogger.Info(
+					"Waiting for the operator certificate fingerprint to propagate " +
+						"before upgrading the instance manager")
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		// Stop the reconciliation loop if upgradeInstanceManager initiated an upgrade
@@ -1267,7 +1289,7 @@ func (r *ClusterReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 		return err
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: maxConcurrentReconciles,
 		}).
@@ -1278,6 +1300,7 @@ func (r *ClusterReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&coordinationv1.Lease{}, builder.WithPredicates(primaryLeasePredicate)).
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.mapConfigMapsToClusters()),
@@ -1314,7 +1337,28 @@ func (r *ClusterReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 			handler.EnqueueRequestsFromMapFunc(r.mapClusterImageCatalogsToClusters()),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
-		Complete(r)
+		Watches(
+			&apiv1.DatabaseRole{},
+			handler.EnqueueRequestsFromMapFunc(r.mapDatabaseRolesToClusters()),
+			// The cluster only consumes spec.passwordSecret (to maintain the
+			// instance RBAC), so status-only changes are irrelevant here.
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		)
+
+	if configuration.Current.OperatorNamespace != "" {
+		ctrlBuilder = ctrlBuilder.Watches(
+			&discoveryv1.EndpointSlice{},
+			handler.EnqueueRequestsFromMapFunc(
+				r.mapPluginEndpointSlicesToClusters(configuration.Current.OperatorNamespace),
+			),
+			builder.WithPredicates(
+				predicate.GenerationChangedPredicate{},
+				operatorNamespaceServiceEndpointSlicePredicate(configuration.Current.OperatorNamespace),
+			),
+		)
+	}
+
+	return ctrlBuilder.Complete(r)
 }
 
 // jobOwnerIndexFunc maps a job definition to its owning cluster and
@@ -1364,6 +1408,19 @@ func (r *ClusterReconciler) createFieldIndexes(ctx context.Context, mgr ctrl.Man
 			}
 			return []string{"true"}
 		}); err != nil {
+		return err
+	}
+
+	// Create a new index field that allows mapping a cluster to all the
+	// plugins that are required to reconcile it
+	if err := mgr.GetFieldIndexer().IndexField(
+		ctx,
+		&apiv1.Cluster{},
+		usedPluginsClusterKey, func(rawObj client.Object) []string {
+			cluster := rawObj.(*apiv1.Cluster)
+			return getPluginsNeededForReconcile(cluster)
+		},
+	); err != nil {
 		return err
 	}
 
@@ -1427,6 +1484,24 @@ func (r *ClusterReconciler) createFieldIndexes(ctx context.Context, mgr ctrl.Man
 			}
 			return []string{cluster.Spec.ImageCatalogRef.Name}
 		}); err != nil {
+		return err
+	}
+
+	// Create a new indexed field on Roles. This field will be used to easily
+	// find all the Roles pointing to a cluster.
+	if err := mgr.GetFieldIndexer().IndexField(
+		ctx,
+		&apiv1.DatabaseRole{},
+		databaseRoleClusterKey,
+		func(rawObj client.Object) []string {
+			role := rawObj.(*apiv1.DatabaseRole)
+			if role.Spec.ClusterRef.Name == "" {
+				return nil
+			}
+
+			return []string{role.Spec.ClusterRef.Name}
+		},
+	); err != nil {
 		return err
 	}
 
@@ -1527,6 +1602,25 @@ func (r *ClusterReconciler) mapPoolersToClusters() handler.MapFunc {
 		}
 		// build requests for cluster referring the secret
 		return []reconcile.Request{{NamespacedName: clusterNamespacedName}}
+	}
+}
+
+// mapDatabaseRolesToClusters returns a function mapping roles to their corresponding cluster
+func (r *ClusterReconciler) mapDatabaseRolesToClusters() handler.MapFunc {
+	return func(_ context.Context, obj client.Object) []reconcile.Request {
+		role, ok := obj.(*apiv1.DatabaseRole)
+		if !ok || role.Spec.ClusterRef.Name == "" {
+			return nil
+		}
+
+		return []reconcile.Request{
+			{
+				NamespacedName: types.NamespacedName{
+					Namespace: role.GetNamespace(),
+					Name:      role.Spec.ClusterRef.Name,
+				},
+			},
+		}
 	}
 }
 

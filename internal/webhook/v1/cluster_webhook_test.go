@@ -514,6 +514,78 @@ var _ = Describe("configuration change validation", func() {
 		v = &ClusterCustomValidator{}
 	})
 
+	It("accepts well-formed parameter names, including namespaced custom GUCs", func() {
+		clusterNew := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				PostgresConfiguration: apiv1.PostgresConfiguration{
+					Parameters: map[string]string{
+						"work_mem":                      "16MB",
+						"auto_explain.log_min_duration": "100ms",
+						"some$ext.param$1":              "value",
+					},
+				},
+				StorageConfiguration: apiv1.StorageConfiguration{
+					Size: "10Gi",
+				},
+			},
+		}
+		Expect(v.validateConfiguration(clusterNew)).To(BeEmpty())
+	})
+
+	DescribeTable("rejects a parameter name that could inject a directive",
+		func(key string) {
+			clusterNew := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					PostgresConfiguration: apiv1.PostgresConfiguration{
+						Parameters: map[string]string{
+							key: "/bin/evil",
+						},
+					},
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+					},
+				},
+			}
+			errs := v.validateConfiguration(clusterNew)
+			Expect(errs).To(HaveLen(1))
+			Expect(errs[0].Type).To(Equal(field.ErrorTypeInvalid))
+			Expect(errs[0].Field).To(HavePrefix("spec.postgresql.parameters"))
+		},
+		Entry("leading comment then newline", "#\narchive_command"),
+		Entry("valid name with a trailing newline injection", "archive_command\nrestart_after = 0"),
+		Entry("carriage return", "archive_command\rrestart_after = 0"),
+	)
+
+	DescribeTable("rejects a malformed parameter name",
+		func(key string) {
+			clusterNew := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					PostgresConfiguration: apiv1.PostgresConfiguration{
+						Parameters: map[string]string{
+							key: "value",
+						},
+					},
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+					},
+				},
+			}
+			errs := v.validateConfiguration(clusterNew)
+			Expect(errs).To(HaveLen(1))
+			Expect(errs[0].Type).To(Equal(field.ErrorTypeInvalid))
+			Expect(errs[0].Field).To(HavePrefix("spec.postgresql.parameters"))
+		},
+		// The end anchor in the name regex matches end-of-text, not end-of-line,
+		// so a trailing newline is caught even though it carries no injected directive.
+		Entry("trailing newline", "archive_command\n"),
+		Entry("embedded NUL byte", "work_mem\x00"),
+		Entry("equals sign", "work_mem=128MB"),
+		Entry("leading whitespace", " work_mem"),
+		Entry("space in the middle", "work mem"),
+		Entry("hash character", "work#mem"),
+		Entry("empty string", ""),
+	)
+
 	It("produces no error when WAL size settings are correct", func() {
 		clusterNew := &apiv1.Cluster{
 			Spec: apiv1.ClusterSpec{
@@ -1997,6 +2069,121 @@ var _ = Describe("Number of synchronous replicas", func() {
 	})
 })
 
+var _ = Describe("validatePrimaryLease", func() {
+	var v *ClusterCustomValidator
+
+	BeforeEach(func() {
+		v = &ClusterCustomValidator{}
+	})
+
+	It("is valid when the stanza is omitted", func() {
+		cluster := &apiv1.Cluster{}
+		Expect(v.validatePrimaryLease(cluster)).To(BeEmpty())
+	})
+
+	It("is valid with the default timings", func() {
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				PrimaryLease: &apiv1.PrimaryLeaseConfiguration{
+					LeaseDurationSeconds: ptr.To(int32(apiv1.DefaultPrimaryLeaseDurationSeconds)),
+					RenewDeadlineSeconds: ptr.To(int32(apiv1.DefaultPrimaryLeaseRenewDeadlineSeconds)),
+				},
+			},
+		}
+		Expect(v.validatePrimaryLease(cluster)).To(BeEmpty())
+	})
+
+	It("rejects a lease duration not greater than the renew deadline", func() {
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				PrimaryLease: &apiv1.PrimaryLeaseConfiguration{
+					LeaseDurationSeconds: ptr.To(int32(10)),
+					RenewDeadlineSeconds: ptr.To(int32(10)),
+				},
+			},
+		}
+		Expect(v.validatePrimaryLease(cluster)).ToNot(BeEmpty())
+	})
+
+	It("validates a partially-specified stanza against the defaults", func() {
+		// Only renewDeadline is set; leaseDuration falls back to the default (15),
+		// which is still greater than the configured renew deadline.
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				PrimaryLease: &apiv1.PrimaryLeaseConfiguration{
+					RenewDeadlineSeconds: ptr.To(int32(8)),
+				},
+			},
+		}
+		Expect(v.validatePrimaryLease(cluster)).To(BeEmpty())
+
+		// A renew deadline at or above the default lease duration is rejected.
+		cluster.Spec.PrimaryLease.RenewDeadlineSeconds = ptr.To(int32(20))
+		Expect(v.validatePrimaryLease(cluster)).ToNot(BeEmpty())
+	})
+
+	It("rejects a renew deadline that is not greater than retryPeriod*1.2", func() {
+		// renewDeadline == retryPeriod: leaseDuration > renewDeadline holds, so the
+		// gap this guards is the one client-go's NewLeaderElector would reject at
+		// runtime (renewDeadline must exceed retryPeriod*1.2), crash-looping the
+		// primary. The webhook must catch it before it ever reaches the instance.
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				PrimaryLease: &apiv1.PrimaryLeaseConfiguration{
+					LeaseDurationSeconds: ptr.To(int32(15)),
+					RenewDeadlineSeconds: ptr.To(int32(10)),
+					RetryPeriodSeconds:   ptr.To(int32(10)),
+				},
+			},
+		}
+		Expect(v.validatePrimaryLease(cluster)).ToNot(BeEmpty())
+	})
+
+	It("rejects a renew deadline just below the retryPeriod*1.2 boundary", func() {
+		// retryPeriod=10 => boundary is 12. renewDeadline=11 is below it and must
+		// be rejected even though leaseDuration (15) > renewDeadline (11).
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				PrimaryLease: &apiv1.PrimaryLeaseConfiguration{
+					LeaseDurationSeconds: ptr.To(int32(15)),
+					RenewDeadlineSeconds: ptr.To(int32(11)),
+					RetryPeriodSeconds:   ptr.To(int32(10)),
+				},
+			},
+		}
+		Expect(v.validatePrimaryLease(cluster)).ToNot(BeEmpty())
+	})
+
+	It("accepts a renew deadline just above the retryPeriod*1.2 boundary", func() {
+		// retryPeriod=10 => boundary is 12. renewDeadline=13 clears it.
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				PrimaryLease: &apiv1.PrimaryLeaseConfiguration{
+					LeaseDurationSeconds: ptr.To(int32(15)),
+					RenewDeadlineSeconds: ptr.To(int32(13)),
+					RetryPeriodSeconds:   ptr.To(int32(10)),
+				},
+			},
+		}
+		Expect(v.validatePrimaryLease(cluster)).To(BeEmpty())
+	})
+
+	It("accepts the documented non-default tuning example", func() {
+		// Mirrors the failover.md example (60/40/15) plus the fixture's released TTL.
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				PrimaryLease: &apiv1.PrimaryLeaseConfiguration{
+					LeaseDurationSeconds:         ptr.To(int32(60)),
+					RenewDeadlineSeconds:         ptr.To(int32(40)),
+					RetryPeriodSeconds:           ptr.To(int32(15)),
+					ReleasedLeaseDurationSeconds: ptr.To(int32(2)),
+				},
+			},
+		}
+		Expect(v.validatePrimaryLease(cluster)).To(BeEmpty())
+	})
+})
+
 var _ = Describe("validateSynchronousReplicaConfiguration", func() {
 	var v *ClusterCustomValidator
 	BeforeEach(func() {
@@ -2375,6 +2562,80 @@ var _ = Describe("validation of an external cluster", func() {
 
 		cluster.Spec.ExternalClusters[0].ConnectionParameters = nil
 		cluster.Spec.ExternalClusters[0].BarmanObjectStore = &apiv1.BarmanObjectStoreConfiguration{}
+		Expect(v.validateExternalClusters(cluster)).To(BeEmpty())
+	})
+
+	DescribeTable("rejects names and secret selectors that would escape the secrets directory",
+		func(mutate func(*apiv1.ExternalCluster)) {
+			ec := apiv1.ExternalCluster{
+				Name:                 "one",
+				ConnectionParameters: map[string]string{"dbname": "postgres"},
+			}
+			mutate(&ec)
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{ExternalClusters: []apiv1.ExternalCluster{ec}},
+			}
+			Expect(v.validateExternalClusters(cluster)).ToNot(BeEmpty())
+		},
+		Entry("traversal in the name", func(ec *apiv1.ExternalCluster) {
+			ec.Name = "../pwned"
+		}),
+		Entry("separator in the name", func(ec *apiv1.ExternalCluster) {
+			ec.Name = "nested/pwned"
+		}),
+		Entry("traversal in the sslCert secret name", func(ec *apiv1.ExternalCluster) {
+			ec.SSLCert = &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "../pwned"},
+				Key:                  "tls.crt",
+			}
+		}),
+		Entry("traversal in the sslCert secret key", func(ec *apiv1.ExternalCluster) {
+			ec.SSLCert = &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "cert"},
+				Key:                  "../pwned",
+			}
+		}),
+	)
+
+	It("does not reject a password selector whose value would be unsafe as a path", func() {
+		// The password selector name and key are never joined into a
+		// filesystem path, so the webhook must leave them untouched.
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				ExternalClusters: []apiv1.ExternalCluster{
+					{
+						Name:                 "one",
+						ConnectionParameters: map[string]string{"dbname": "postgres"},
+						Password: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "../pwned"},
+							Key:                  "../pwned",
+						},
+					},
+				},
+			},
+		}
+		Expect(v.validateExternalClusters(cluster)).To(BeEmpty())
+	})
+
+	It("accepts a well-formed name and secret selectors", func() {
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				ExternalClusters: []apiv1.ExternalCluster{
+					{
+						Name:                 "one",
+						ConnectionParameters: map[string]string{"dbname": "postgres"},
+						SSLCert: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "cert"},
+							Key:                  "tls.crt",
+						},
+						Password: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "creds"},
+							Key:                  "password",
+						},
+					},
+				},
+			},
+		}
 		Expect(v.validateExternalClusters(cluster)).To(BeEmpty())
 	})
 })

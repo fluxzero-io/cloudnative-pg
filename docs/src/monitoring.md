@@ -535,6 +535,14 @@ Take care that the referred resources have to be created **in the same namespace
     Schema-qualify catalog references (`pg_catalog.now()`,
     `pg_catalog.current_database()`) to prevent `search_path` shadowing
     by user-owned objects.
+
+    Custom monitoring queries run inside a transaction whose
+    `search_path` is pinned to `pg_catalog, public, pg_temp`,
+    regardless of any `search_path` configured on the database or the
+    role. Unqualified references to objects in other user-defined
+    schemas will therefore fail to resolve: schema-qualify them (e.g.
+    `myschema.mytable`) so the query does not depend on the
+    `search_path`.
 :::
 
 #### Example of a user defined metric
@@ -996,7 +1004,7 @@ metadata:
 spec:
   containers:
   - name: curl
-    image: curlimages/curl:8.17.0
+    image: curlimages/curl:8.21.0
     command: ['sleep', '3600']
 EOF
 ```

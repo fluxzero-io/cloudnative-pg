@@ -1,4 +1,8 @@
 {
+  "19": [
+    "19beta1-system-trixie",
+    "19beta1-202606151220-system-trixie"
+  ],
   "18": [
     "18.4-system-trixie",
     "18.3-system-trixie"
@@ -18,9 +22,5 @@
   "14": [
     "14.23-system-trixie",
     "14.22-system-trixie"
-  ],
-  "13": [
-    "13.22-system-trixie",
-    "13.22-202511100817-system-trixie"
   ]
 }
