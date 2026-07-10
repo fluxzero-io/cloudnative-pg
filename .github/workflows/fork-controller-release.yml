@@ -10,6 +10,11 @@ on:
         description: "Rolling image tag to publish"
         required: false
         default: "main"
+      publish_chart_release:
+        description: "Dispatch a cloudnative-pg chart release after publishing the controller image"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -51,35 +56,57 @@ jobs:
         env:
           INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
+          set -euo pipefail
+
           git remote add upstream https://github.com/cloudnative-pg/cloudnative-pg.git || true
-          git fetch --tags upstream main:refs/remotes/upstream/main
+          git fetch --tags upstream
 
           commit_sha="$(git rev-parse HEAD)"
           commit_short="$(git rev-parse --short=12 HEAD)"
           commit_date="$(git log -1 --pretty=format:'%ad' --date short "${commit_sha}")"
-          base_version="$(git describe --tags --match 'v*' "${commit_sha}" | sed -e 's/^v//; s/-g[0-9a-f]\+$//; s/-\([0-9]\+\)$/-dev\1/')"
-          fork_version="${base_version}-flux.${GITHUB_RUN_NUMBER}"
+          upstream_release_tag=""
+          while IFS= read -r candidate; do
+            if [[ "${candidate}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              upstream_release_tag="${candidate}"
+              break
+            fi
+          done < <(git tag --merged "${commit_sha}" --list 'v*' --sort=-version:refname)
+
+          if [[ -z "${upstream_release_tag}" ]]; then
+            echo "::error::No stable upstream release tag is contained in ${commit_sha}."
+            exit 1
+          fi
+
+          base_version="${upstream_release_tag#v}"
+          fork_version="${base_version}-fz.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
           image_tag="${INPUT_IMAGE_TAG:-main}"
-          upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
-          upstream_short="$(git rev-parse --short=12 refs/remotes/upstream/main)"
+          upstream_sha="$(git rev-list -n 1 "${upstream_release_tag}")"
+          upstream_short="$(git rev-parse --short=12 "${upstream_sha}")"
           repo_owner="${GITHUB_REPOSITORY_OWNER,,}"
           image_base="${REGISTRY}/${repo_owner}/${IMAGE_NAME}"
 
-          echo "DATE=${commit_date}" >> "$GITHUB_ENV"
-          echo "VERSION=${fork_version}" >> "$GITHUB_ENV"
-          echo "COMMIT=${commit_short}" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=${image_tag}" >> "$GITHUB_ENV"
-          echo "REPO_OWNER=${repo_owner}" >> "$GITHUB_ENV"
-          echo "IMAGE_BASE=${image_base}" >> "$GITHUB_ENV"
-          echo "UPSTREAM_SHA=${upstream_sha}" >> "$GITHUB_ENV"
-          echo "UPSTREAM_SHORT=${upstream_short}" >> "$GITHUB_ENV"
-          echo "GOPATH=$(go env GOPATH)" >> "$GITHUB_ENV"
-          echo "PWD=$(pwd)" >> "$GITHUB_ENV"
+          {
+            echo "DATE=${commit_date}"
+            echo "VERSION=${fork_version}"
+            echo "COMMIT=${commit_short}"
+            echo "IMAGE_TAG=${image_tag}"
+            echo "REPO_OWNER=${repo_owner}"
+            echo "IMAGE_BASE=${image_base}"
+            echo "UPSTREAM_SHA=${upstream_sha}"
+            echo "UPSTREAM_RELEASE=${upstream_release_tag}"
+            echo "UPSTREAM_SHORT=${upstream_short}"
+            echo "GOPATH=$(go env GOPATH)"
+            echo "PWD=$(pwd)"
+          } >> "$GITHUB_ENV"
 
-          echo "commit_short=${commit_short}" >> "$GITHUB_OUTPUT"
-          echo "image_base=${image_base}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
-          echo "upstream_short=${upstream_short}" >> "$GITHUB_OUTPUT"
+          {
+            echo "fork_version=${fork_version}"
+            echo "commit_short=${commit_short}"
+            echo "upstream_release=${upstream_release_tag}"
+            echo "image_base=${image_base}"
+            echo "image_tag=${image_tag}"
+            echo "upstream_short=${upstream_short}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Better release checks
         run: |
@@ -148,11 +175,13 @@ jobs:
           echo "UBI_DIGEST=${ubi_digest}" >> "$GITHUB_ENV"
 
           docker buildx imagetools create \
+            -t "${IMAGE_BASE}:${VERSION}" \
             -t "${IMAGE_BASE}:sha-${COMMIT}" \
             -t "${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}" \
             "${IMAGE_BASE}@${distroless_digest}"
 
           docker buildx imagetools create \
+            -t "${IMAGE_BASE}:${VERSION}-ubi9" \
             -t "${IMAGE_BASE}:sha-${COMMIT}-ubi9" \
             -t "${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}-ubi9" \
             "${IMAGE_BASE}@${ubi_digest}"
@@ -174,12 +203,14 @@ jobs:
           make generate-manifest
           cat > dist/fork-controller-release.txt <<EOF
           image=${CONTROLLER_IMG}@${CONTROLLER_IMG_DIGEST}
+          image_version_tag=${IMAGE_BASE}:${VERSION}
           image_ubi=${IMAGE_BASE}:${IMAGE_TAG}-ubi9@${UBI_DIGEST}
           image_sha_tag=${IMAGE_BASE}:sha-${COMMIT}
           image_upstream_tag=${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}
           version=${VERSION}
           commit=${GITHUB_SHA}
           upstream=${UPSTREAM_SHA}
+          upstream_release=${UPSTREAM_RELEASE}
           EOF
 
       - name: Upload release artifacts
@@ -197,10 +228,40 @@ jobs:
           ## Fork controller release
 
           Published:
+          - \`${IMAGE_BASE}:${VERSION}\`
           - \`${IMAGE_BASE}:${IMAGE_TAG}@${DISTROLESS_DIGEST}\`
           - \`${IMAGE_BASE}:${IMAGE_TAG}-ubi9@${UBI_DIGEST}\`
           - \`${IMAGE_BASE}:sha-${COMMIT}\`
           - \`${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}\`
 
+          Based on upstream release \`${UPSTREAM_RELEASE}\`.
           The digest-pinned install manifest is attached as the \`fork-controller-release\` artifact.
           EOF
+
+      - name: Create chart release app token
+        id: chart-release-token
+        if: github.ref_name == github.event.repository.default_branch && (github.event_name != 'workflow_dispatch' || inputs.publish_chart_release)
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.FLUXZERO_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.FLUXZERO_BOT_PRIVATE_KEY }}
+          owner: fluxzero-io
+          repositories: cloudnative-pg-charts
+          permission-actions: write
+          permission-contents: read
+
+      - name: Dispatch chart release
+        if: github.ref_name == github.event.repository.default_branch && (github.event_name != 'workflow_dispatch' || inputs.publish_chart_release)
+        env:
+          GH_TOKEN: ${{ steps.chart-release-token.outputs.token }}
+          OPERATOR_REF: ${{ github.sha }}
+          OPERATOR_IMAGE_TAG: ${{ steps.meta.outputs.fork_version }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run fork-cloudnative-pg-chart-release.yml \
+            --repo fluxzero-io/cloudnative-pg-charts \
+            --ref main \
+            -f operator_ref="${OPERATOR_REF}" \
+            -f operator_image_tag="${OPERATOR_IMAGE_TAG}" \
+            -f auto_merge=true

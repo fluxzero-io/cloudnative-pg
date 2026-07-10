@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: "Upstream ref to merge"
-        required: true
-        default: "main"
+        description: "Stable upstream release tag to merge. Empty uses the latest release."
+        required: false
+        default: ""
       target_branch:
         description: "Fork branch to sync"
         required: true
@@ -29,7 +29,7 @@ concurrency:
 
 env:
   UPSTREAM_REPOSITORY: cloudnative-pg/cloudnative-pg
-  UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+  INPUT_UPSTREAM_REF: ${{ inputs.upstream_ref || '' }}
   TARGET_BRANCH: ${{ inputs.target_branch || 'main' }}
   SYNC_BRANCH: automation/upstream-sync
 
@@ -123,19 +123,47 @@ jobs:
           git config user.name "cloudnative-pg fork sync"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Fetch upstream
+      - name: Resolve and fetch upstream release
         id: upstream
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
+          set -euo pipefail
+
+          upstream_ref="${INPUT_UPSTREAM_REF}"
+          if [[ -z "${upstream_ref}" ]]; then
+            release_tags="$(gh release list \
+              --repo "${UPSTREAM_REPOSITORY}" \
+              --json tagName,isDraft,isPrerelease \
+              --limit 100 \
+              --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName')"
+
+            while IFS= read -r candidate; do
+              if [[ "${candidate}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                upstream_ref="${candidate}"
+                break
+              fi
+            done < <(sort -Vr <<< "${release_tags}")
+          fi
+
+          if [[ ! "${upstream_ref}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a stable upstream release tag, got '${upstream_ref}'."
+            exit 1
+          fi
+
           git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
           git fetch --tags origin "${TARGET_BRANCH}"
-          git fetch --tags upstream "${UPSTREAM_REF}:refs/remotes/upstream/${UPSTREAM_REF}"
+          git fetch upstream "refs/tags/${upstream_ref}:refs/tags/${upstream_ref}"
 
-          upstream_sha="$(git rev-parse "refs/remotes/upstream/${UPSTREAM_REF}")"
-          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          upstream_sha="$(git rev-list -n 1 "refs/tags/${upstream_ref}")"
+          {
+            echo "upstream_ref=${upstream_ref}"
+            echo "upstream_sha=${upstream_sha}"
+          } >> "$GITHUB_OUTPUT"
 
           if git merge-base --is-ancestor "${upstream_sha}" HEAD; then
             echo "synced=true" >> "$GITHUB_OUTPUT"
-            echo "Fork ${TARGET_BRANCH} already contains upstream ${UPSTREAM_REF} (${upstream_sha})."
+            echo "Fork ${TARGET_BRANCH} already contains upstream release ${upstream_ref} (${upstream_sha})."
             exit 0
           fi
 
@@ -143,9 +171,11 @@ jobs:
 
       - name: Merge upstream
         if: steps.upstream.outputs.synced != 'true'
+        env:
+          UPSTREAM_RELEASE_TAG: ${{ steps.upstream.outputs.upstream_ref }}
         run: |
           git switch -C "${SYNC_BRANCH}" "origin/${TARGET_BRANCH}"
-          git merge --no-ff --no-edit "refs/remotes/upstream/${UPSTREAM_REF}"
+          git merge --no-ff --no-edit "refs/tags/${UPSTREAM_RELEASE_TAG}"
 
       - name: Regenerate manifests
         if: steps.upstream.outputs.synced != 'true'
@@ -172,12 +202,13 @@ jobs:
         if: steps.upstream.outputs.synced != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          UPSTREAM_RELEASE_TAG: ${{ steps.upstream.outputs.upstream_ref }}
           UPSTREAM_SHA: ${{ steps.upstream.outputs.upstream_sha }}
-          AUTO_MERGE: ${{ inputs.auto_merge || false }}
+          AUTO_MERGE: ${{ github.event_name == 'schedule' || inputs.auto_merge }}
         run: |
-          title="chore: sync ${TARGET_BRANCH} with upstream/${UPSTREAM_REF}"
+          title="chore: sync ${TARGET_BRANCH} with upstream ${UPSTREAM_RELEASE_TAG}"
           body="$(cat <<EOF
-          Automated sync of \`${TARGET_BRANCH}\` with \`${UPSTREAM_REPOSITORY}@${UPSTREAM_REF}\`.
+          Automated sync of \`${TARGET_BRANCH}\` with release \`${UPSTREAM_REPOSITORY}@${UPSTREAM_RELEASE_TAG}\`.
 
           Upstream commit: \`${UPSTREAM_SHA}\`
 
