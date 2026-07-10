@@ -17,7 +17,7 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
   packages: write
   id-token: write
 
@@ -222,6 +222,41 @@ jobs:
             dist/fork-controller-release.txt
           retention-days: 30
 
+      - name: Publish controller GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_tag="v${VERSION}"
+          notes_file="$(mktemp)"
+          cat > "${notes_file}" <<EOF
+          Fluxzero CloudNativePG controller release.
+
+          - Operator image: \`${IMAGE_BASE}:${VERSION}\`
+          - Source commit: \`${GITHUB_SHA}\`
+          - Upstream release: \`${UPSTREAM_RELEASE}\`
+          - Upstream commit: \`${UPSTREAM_SHA}\`
+          EOF
+
+          if gh release view "${release_tag}" >/dev/null 2>&1; then
+            gh release upload "${release_tag}" \
+              dist/operator-manifest.yaml \
+              dist/fork-controller-release.txt \
+              --clobber
+            gh release edit "${release_tag}" \
+              --target "${GITHUB_SHA}" \
+              --title "${release_tag}" \
+              --notes-file "${notes_file}"
+          else
+            gh release create "${release_tag}" \
+              dist/operator-manifest.yaml \
+              dist/fork-controller-release.txt \
+              --target "${GITHUB_SHA}" \
+              --title "${release_tag}" \
+              --notes-file "${notes_file}"
+          fi
+
       - name: Release summary
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
@@ -256,6 +291,7 @@ jobs:
           GH_TOKEN: ${{ steps.chart-release-token.outputs.token }}
           OPERATOR_REF: ${{ github.sha }}
           OPERATOR_IMAGE_TAG: ${{ steps.meta.outputs.fork_version }}
+          OPERATOR_UPSTREAM_VERSION: ${{ steps.meta.outputs.upstream_release }}
         run: |
           set -euo pipefail
 
@@ -264,4 +300,5 @@ jobs:
             --ref main \
             -f operator_ref="${OPERATOR_REF}" \
             -f operator_image_tag="${OPERATOR_IMAGE_TAG}" \
+            -f operator_upstream_version="${OPERATOR_UPSTREAM_VERSION}" \
             -f auto_merge=true
