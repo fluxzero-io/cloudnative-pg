@@ -239,17 +239,21 @@ jobs:
           - Upstream commit: \`${UPSTREAM_SHA}\`
           EOF
 
-          if gh release view "${release_tag}" >/dev/null 2>&1; then
+          if gh release view "${release_tag}" \
+            --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${release_tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
               dist/operator-manifest.yaml \
               dist/fork-controller-release.txt \
               --clobber
             gh release edit "${release_tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" \
               --title "${release_tag}" \
               --notes-file "${notes_file}"
           else
             gh release create "${release_tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
               dist/operator-manifest.yaml \
               dist/fork-controller-release.txt \
               --target "${GITHUB_SHA}" \
