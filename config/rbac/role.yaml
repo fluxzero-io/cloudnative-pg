@@ -58,6 +58,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumes
+  verbs:
+  - get
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - pods/status
   verbs:
   - get

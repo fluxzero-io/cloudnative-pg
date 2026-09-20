@@ -69,6 +69,20 @@ func (r *ClusterReconciler) scaleDownCluster(
 	r.Recorder.Event(cluster, "Normal", "ScaleDown", message)
 	contextLogger.Info(message)
 
+	if cluster.Annotations[persistentvolumeclaim.ReclaimRetiredReplicaVolumesAnnotation] == "true" {
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
+		if err := persistentvolumeclaim.DeleteRetiredReplicaPVCGroup(ctx, r.Client, reader, cluster, instanceName); err != nil {
+			return err
+		}
+		if err := r.ensureInstancePodIsDeleted(ctx, cluster, instanceName); err != nil {
+			return err
+		}
+		return r.ensureInstanceJobAreDeleted(ctx, cluster, instanceName)
+	}
+
 	return r.ensureInstanceIsDeleted(ctx, cluster, instanceName)
 }
 

@@ -94,6 +94,7 @@ var errOldPrimaryDetected = errors.New("old primary detected")
 // ClusterReconciler reconciles a Cluster objects
 type ClusterReconciler struct {
 	client.Client
+	APIReader client.Reader
 
 	DiscoveryClient    discovery.DiscoveryInterface
 	Scheme             *runtime.Scheme
@@ -120,6 +121,7 @@ func NewClusterReconciler(
 		InstanceClient:     remote.NewClient().Instance(),
 		DiscoveryClient:    discoveryClient,
 		Client:             operatorclient.NewExtendedClient(mgr.GetClient()),
+		APIReader:          mgr.GetAPIReader(),
 		Scheme:             mgr.GetScheme(),
 		Recorder:           mgr.GetEventRecorderFor("cloudnative-pg"), //nolint:staticcheck
 		Plugins:            plugins,
@@ -153,6 +155,7 @@ var ErrNextLoop = utils.ErrNextLoop
 // +kubebuilder:rbac:groups="",resources=configmaps/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;patch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;create;watch;delete;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;delete;patch;create;watch
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get

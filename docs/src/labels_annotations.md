@@ -265,6 +265,21 @@ CloudNativePG manages the following predefined annotations:
 :   When set to `disabled` on a `Cluster`, the operator prevents the
     reconciliation loop from running.
 
+`cnpg.io/reclaim-retired-replica-volumes`
+:   Fluxzero extension, disabled by default. When set to `true` on a `Cluster`,
+    a controlled replica scale-down changes only that replica's verified CSI
+    volumes from `Retain` to `Delete` before deleting its claims. Kubernetes and
+    the CSI driver then release the physical storage after the pods detach it.
+    The operator requires `get` and `patch` permissions on persistent volumes.
+
+    Cleanup requires a healthy owned primary, stable primary selection, matching
+    cluster/PVC/PV identities and an active scale-down. Claim deletion uses UID
+    preconditions; conflicting or unverifiable resources stop scale-down.
+    This does not change storage classes, cluster-deletion retention, maintenance
+    or recovery behavior. Previously released volumes are not swept automatically:
+    their deleted claims can no longer prove ownership. CSI deletion remains
+    asynchronous and provider completion must be monitored independently.
+
 `cnpg.io/reloadedAt`
 :   Contains the latest cluster `reload` time. `reload` is triggered by the user through a plugin.
 
