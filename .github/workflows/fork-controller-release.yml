@@ -6,6 +6,10 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      canary_only:
+        description: "Publish an isolated canary image without releases, upstream aliases or chart updates"
+        type: boolean
+        default: false
       image_tag:
         description: "Rolling image tag to publish"
         required: false
@@ -55,6 +59,7 @@ jobs:
         id: meta
         env:
           INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          CANARY_ONLY: ${{ inputs.canary_only }}
         run: |
           set -euo pipefail
 
@@ -80,6 +85,10 @@ jobs:
           base_version="${upstream_release_tag#v}"
           fork_version="${base_version}-fz.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
           image_tag="${INPUT_IMAGE_TAG:-main}"
+          if [[ "${CANARY_ONLY}" == "true" && ! "${image_tag}" =~ ^canary- ]]; then
+            echo "::error::Canary image tags must start with canary-."
+            exit 1
+          fi
           upstream_sha="$(git rev-list -n 1 "${upstream_release_tag}")"
           upstream_short="$(git rev-parse --short=12 "${upstream_sha}")"
           repo_owner="${GITHUB_REPOSITORY_OWNER,,}"
@@ -177,14 +186,17 @@ jobs:
           docker buildx imagetools create \
             -t "${IMAGE_BASE}:${VERSION}" \
             -t "${IMAGE_BASE}:sha-${COMMIT}" \
-            -t "${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}" \
             "${IMAGE_BASE}@${distroless_digest}"
 
           docker buildx imagetools create \
             -t "${IMAGE_BASE}:${VERSION}-ubi9" \
             -t "${IMAGE_BASE}:sha-${COMMIT}-ubi9" \
-            -t "${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}-ubi9" \
             "${IMAGE_BASE}@${ubi_digest}"
+
+          if [[ "${{ inputs.canary_only }}" != "true" ]]; then
+            docker buildx imagetools create -t "${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}" "${IMAGE_BASE}@${distroless_digest}"
+            docker buildx imagetools create -t "${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}-ubi9" "${IMAGE_BASE}@${ubi_digest}"
+          fi
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -223,6 +235,7 @@ jobs:
           retention-days: 30
 
       - name: Publish controller GitHub release
+        if: inputs.canary_only != true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -271,7 +284,6 @@ jobs:
           - \`${IMAGE_BASE}:${IMAGE_TAG}@${DISTROLESS_DIGEST}\`
           - \`${IMAGE_BASE}:${IMAGE_TAG}-ubi9@${UBI_DIGEST}\`
           - \`${IMAGE_BASE}:sha-${COMMIT}\`
-          - \`${IMAGE_BASE}:upstream-${UPSTREAM_SHORT}\`
 
           Based on upstream release \`${UPSTREAM_RELEASE}\`.
           The digest-pinned install manifest is attached as the \`fork-controller-release\` artifact.
@@ -279,7 +291,7 @@ jobs:
 
       - name: Create chart release app token
         id: chart-release-token
-        if: github.ref_name == github.event.repository.default_branch && (github.event_name != 'workflow_dispatch' || inputs.publish_chart_release)
+        if: inputs.canary_only != true && github.ref_name == github.event.repository.default_branch && (github.event_name != 'workflow_dispatch' || inputs.publish_chart_release)
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.FLUXZERO_BOT_CLIENT_ID }}
@@ -290,7 +302,7 @@ jobs:
           permission-contents: read
 
       - name: Dispatch chart release
-        if: github.ref_name == github.event.repository.default_branch && (github.event_name != 'workflow_dispatch' || inputs.publish_chart_release)
+        if: inputs.canary_only != true && github.ref_name == github.event.repository.default_branch && (github.event_name != 'workflow_dispatch' || inputs.publish_chart_release)
         env:
           GH_TOKEN: ${{ steps.chart-release-token.outputs.token }}
           OPERATOR_REF: ${{ github.sha }}
