@@ -48,6 +48,18 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/versions"
 )
 
+// Reasons of the ConsistentSystemID condition
+const (
+	// systemIDNotFoundReason is used when no instance reported a system ID
+	systemIDNotFoundReason = "NotFound"
+
+	// systemIDUniqueReason is used when all the reporting instances agree on a single system ID
+	systemIDUniqueReason = "Unique"
+
+	// systemIDMismatchReason is used when the instances report different system IDs
+	systemIDMismatchReason = "Mismatch"
+)
+
 // managedResources contains the resources that are created a cluster
 // and need to be managed by the controller
 type managedResources struct {
@@ -266,7 +278,8 @@ func (r *ClusterReconciler) updateResourceStatus(
 	// If we are switching, check if the target primary is still active
 	// Ignore this check if current primary is empty (it happens during the bootstrap)
 	if cluster.Status.TargetPrimary != cluster.Status.CurrentPrimary &&
-		cluster.Status.CurrentPrimary != "" {
+		cluster.Status.CurrentPrimary != "" &&
+		cluster.Status.TargetPrimary != apiv1.PendingFailoverMarker {
 		found := false
 		for _, instance := range utils.FilterActivePods(resources.instances.Items) {
 			// If the target primary is not active, it will never be promoted
@@ -280,9 +293,9 @@ func (r *ClusterReconciler) updateResourceStatus(
 		if !found {
 			// Reset the target primary, since the available one is not active
 			// or not present
-			log.FromContext(ctx).Info("Wrong target primary, the chosen one is not active or not present",
-				"targetPrimary", cluster.Status.TargetPrimary,
-				"instances", resources.instances)
+			contextLogger.Info("Wrong target primary, the chosen one is not active or not present",
+				"targetPrimary", cluster.Status.TargetPrimary)
+			contextLogger.Debug("Instances status dump", "instances", resources.instances.Items)
 			cluster.Status.TargetPrimary = cluster.Status.CurrentPrimary
 			cluster.Status.TargetPrimaryTimestamp = pgTime.GetCurrentTimestamp()
 		}
@@ -786,7 +799,7 @@ func (r *ClusterReconciler) updateClusterStatusThatRequiresInstancesState(
 		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 			Type:    string(apiv1.ConditionConsistentSystemID),
 			Status:  metav1.ConditionFalse,
-			Reason:  "NotFound",
+			Reason:  systemIDNotFoundReason,
 			Message: message,
 		})
 
@@ -795,7 +808,7 @@ func (r *ClusterReconciler) updateClusterStatusThatRequiresInstancesState(
 		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 			Type:    string(apiv1.ConditionConsistentSystemID),
 			Status:  metav1.ConditionTrue,
-			Reason:  "Unique",
+			Reason:  systemIDUniqueReason,
 			Message: "A single, unique system ID was found across reporting instances.",
 		})
 
@@ -805,7 +818,7 @@ func (r *ClusterReconciler) updateClusterStatusThatRequiresInstancesState(
 		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 			Type:    string(apiv1.ConditionConsistentSystemID),
 			Status:  metav1.ConditionFalse,
-			Reason:  "Mismatch",
+			Reason:  systemIDMismatchReason,
 			Message: fmt.Sprintf("Multiple differing system IDs reported by instances: %q", detectedSystemID.ToSortedList()),
 		})
 	}
@@ -857,6 +870,15 @@ func isWALSpaceAvailableOnPod(pod *corev1.Pod) bool {
 	}
 	// Return true if WAL space IS available (i.e., NOT terminated for missing disk space)
 	return !hasPostgresContainerTerminationReason(pod, isTerminatedForMissingWALDiskSpace)
+}
+
+// isTerminatedBecauseOfMissingWALArchivePlugin reports whether a Pod terminated because
+// the WAL archiving plugin has no sidecar in it.
+func isTerminatedBecauseOfMissingWALArchivePlugin(pod *corev1.Pod) bool {
+	isTerminatedForMissingWALArchivePlugin := func(state *corev1.ContainerState) bool {
+		return state.Terminated != nil && state.Terminated.ExitCode == apiv1.MissingWALArchivePlugin
+	}
+	return hasPostgresContainerTerminationReason(pod, isTerminatedForMissingWALArchivePlugin)
 }
 
 func hasPostgresContainerTerminationReason(pod *corev1.Pod, reason func(state *corev1.ContainerState) bool) bool {

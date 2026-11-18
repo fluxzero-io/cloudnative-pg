@@ -1,0 +1,23 @@
+name: Controller tests
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Controller and PVC resize tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Test controller and storage reconciliation
+        run: go test -count=1 -v ./api/v1 ./internal/webhook/v1 ./internal/controller ./pkg/reconciler/persistentvolumeclaim

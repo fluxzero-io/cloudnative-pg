@@ -135,6 +135,9 @@ func (r instanceClientImpl) extractInstancesStatus(
 
 	for idx := range activePods {
 		instanceStatus := r.getReplicaStatusFromPodViaHTTP(ctx, activePods[idx])
+		if cluster != nil {
+			instanceStatus.IsFenced = cluster.IsInstanceFenced(activePods[idx].Name)
+		}
 		result.Items = append(result.Items, instanceStatus)
 	}
 	return result
@@ -156,7 +159,7 @@ func (r *instanceClientImpl) getReplicaStatusFromPodViaHTTP(
 		}
 
 		// If the pod answered with a not ok status, it is pointless to retry
-		var statuserror StatusError
+		var statuserror *StatusError
 		if errors.As(err, &statuserror) {
 			return false
 		}

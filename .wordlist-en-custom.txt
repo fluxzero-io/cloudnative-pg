@@ -9,12 +9,14 @@ AZs
 AdditionalCommandArgs
 AdditionalPodAffinity
 AdditionalPodAntiAffinity
+AdzerKI
 AffinityConfiguration
 AllNamespaces
 Anand
 AntiAffinity
 AppArmor
 AppArmorProfile
+ArgoCD
 Armando
 AuthQuery
 AuthQuerySecret
@@ -201,6 +203,7 @@ Francesco
 GC
 GCE
 GCS
+GHSA
 GID
 GIS
 GKE
@@ -210,6 +213,7 @@ GUCs
 GabriFedi
 Gabriele
 GaugeVec
+GellertBabel
 GeoSpatial
 Gi
 GitOps
@@ -223,8 +227,10 @@ GrantUsageSpecType
 HH
 HPA
 HashiCorp
+Hetzner
 HistoryTags
 Homebrew
+HoniSanders
 Huß
 IAM
 INPLACE
@@ -252,6 +258,7 @@ Isovalent
 Istio
 Istio's
 JSON
+Jamstah
 JefeDavis
 Joda
 KV
@@ -409,6 +416,7 @@ PostInitApplicationSQLRefs
 PostInitSQLRefs
 PostInitTemplateSQLRefs
 Postgres
+PostgresCapabilities
 PostgresConfiguration
 PrimaryLeaseConfiguration
 PrimaryUpdateMethod
@@ -553,6 +561,7 @@ SubscriptionStatus
 SuccessfullyExtracted
 SuperUserSecret
 SwitchReplicaClusterStatus
+Symlinked
 SyncReplicaElectionConstraints
 SynchronizeReplicas
 SynchronizeReplicasConfiguration
@@ -643,6 +652,7 @@ allowPrivilegeEscalation
 allowVolumeExpansion
 alm
 amd
+andrew
 angus
 anonymization
 api
@@ -662,6 +672,7 @@ appsv
 appuser
 archiveAdditionalCommandArgs
 archiver
+ardentperf
 args
 armru
 async
@@ -823,6 +834,7 @@ coreos
 corev
 cp
 cpu
+crashloop
 crds
 createdAt
 createdb
@@ -849,6 +861,7 @@ customresourcedefinitions
 cutover
 cyber
 dT
+daanvinken
 danglingPVC
 dataChecksums
 dataDurability
@@ -879,6 +892,7 @@ ddf
 ddl
 de
 declaratively
+decrypt
 defaultMode
 demotionToken
 dennispidun
@@ -931,6 +945,7 @@ ephemeralVolumesSizeLimit
 ephemeralvolumessizelimitconfiguration
 ermakov
 eu
+evan
 excludePatterns
 executables
 expirations
@@ -955,6 +970,7 @@ failoverquorumstatus
 failovers
 failureThreshold
 faq
+farries
 fastpath
 fb
 fd
@@ -1016,6 +1032,7 @@ httpGet
 https
 hu
 hugepages
+ichibahn
 icu
 icuLocale
 icuRules
@@ -1076,10 +1093,12 @@ jaconi
 jdbc
 jmealo
 jobCount
+jonasbadstuebner
 jq
 json
 jsonpath
 juliamertz
+kabbydriver
 kb
 kbytes
 kdautrey
@@ -1183,6 +1202,7 @@ minSyncReplicas
 minikube
 minio
 misconfigurations
+mjlshen
 mmap
 monitoringconfiguration
 mountPath
@@ -1250,6 +1270,7 @@ passwordStatus
 passwordstate
 pc
 pchovelon
+pcj
 pdf
 periodSeconds
 persistentVolumeClaims
@@ -1352,6 +1373,7 @@ pprof
 pre
 preferredDuringSchedulingIgnoredDuringExecution
 prefetched
+prefetching
 preload
 prepended
 prepends
@@ -1388,6 +1410,7 @@ pvc
 pvcCount
 pvcName
 pvcTemplate
+qc
 quantile
 queryable
 quickstart
@@ -1426,7 +1449,9 @@ reportNonRedacted
 reportRedacted
 req
 requestTimeout
+requeue
 requeued
+requeues
 requiredDuringSchedulingIgnoredDuringExecution
 resizeInUseVolumes
 resizingPVC
@@ -1532,6 +1557,7 @@ sqlrefs
 src
 sre
 ssc
+sse
 ssl
 sslCert
 sslKey
@@ -1641,6 +1667,7 @@ toto
 transactionID
 transactional
 transactionid
+trixie
 tx
 ubi
 ui
@@ -1670,6 +1697,7 @@ usename
 usernamepassword
 usr
 utils
+valeriodelsarto
 validUntil
 validatingwebhookconfigurations
 validator
@@ -1683,6 +1711,7 @@ volumeSnapshot
 volumeSnapshots
 volumesnapshot
 volumesnapshotconfiguration
+vp
 vpa
 waitForArchive
 wal
