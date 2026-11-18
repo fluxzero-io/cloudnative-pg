@@ -90,7 +90,7 @@ type ClusterCustomDefaulter struct{}
 
 // Default implements webhook.CustomDefaulter so a webhook will be registered for the Kind Cluster.
 func (d *ClusterCustomDefaulter) Default(_ context.Context, cluster *apiv1.Cluster) error {
-	clusterLog.Info("Defaulting for Cluster", "name", cluster.GetName(), "namespace", cluster.GetNamespace())
+	clusterLog.Debug("Defaulting for Cluster", "name", cluster.GetName(), "namespace", cluster.GetNamespace())
 
 	cluster.Default()
 
@@ -2806,7 +2806,7 @@ func getInTreeBarmanWarnings(r *apiv1.Cluster) admission.Warnings {
 		result = append(
 			result,
 			fmt.Sprintf("Native support for Barman Cloud backups and recovery is deprecated and will be "+
-				"completely removed in CloudNativePG 1.31.0. Found usage in: %s. "+
+				"completely removed in CloudNativePG 1.32.0. Found usage in: %s. "+
 				"Please migrate existing clusters to the new Barman Cloud Plugin to ensure a smooth transition.",
 				pathsStr),
 		)
@@ -3031,7 +3031,15 @@ func (v *ClusterCustomValidator) validateExtensions(r *apiv1.Cluster) field.Erro
 				continue
 			}
 
-			if strings.HasPrefix(filepath.Clean(path), "..") {
+			// filepath.IsLocal reports whether the path, after joining it under
+			// "." and resolving "..", would stay within that base. Joining
+			// under "." first (rather than a placeholder mount point) makes
+			// this independent of the extension mount point's actual depth:
+			// the Collect*Paths functions join these paths under a
+			// real, multi-segment mount point at runtime, and a placeholder
+			// base shallower than that real path would wrongly accept some
+			// escaping paths (e.g. "../mount/lib").
+			if !filepath.IsLocal(filepath.Join(".", path)) {
 				result = append(result, field.Invalid(
 					fieldPath.Index(j),
 					path,

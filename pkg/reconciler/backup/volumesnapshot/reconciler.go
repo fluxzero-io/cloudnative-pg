@@ -128,7 +128,10 @@ func (se *Reconciler) enrichSnapshot(
 	vs.Labels[utils.BackupDateLabelName] = now.Format("20060102")
 	vs.Labels[utils.BackupMonthLabelName] = now.Format("200601")
 	vs.Labels[utils.BackupYearLabelName] = strconv.Itoa(now.Year())
-	vs.Annotations[utils.IsOnlineBackupLabelName] = strconv.FormatBool(backup.Status.GetOnline())
+	// backup.Status.Online is only set once the backup is finalized, which happens
+	// after the snapshots have been created: the effective online setting has to be
+	// taken from the configuration, as Status.Online is still empty at this point
+	vs.Annotations[utils.IsOnlineBackupLabelName] = strconv.FormatBool(backup.GetOnlineOrDefault(cluster))
 
 	rawCluster, err := json.Marshal(cluster)
 	if err != nil {
@@ -203,9 +206,7 @@ func (se *Reconciler) internalReconcile(
 	if err != nil {
 		return nil, err
 	}
-	volumeSnapshotConfig := backup.GetVolumeSnapshotConfiguration(*cluster.Spec.Backup.VolumeSnapshot)
-
-	exec := se.newExecutor(volumeSnapshotConfig.GetOnline())
+	exec := se.newExecutor(backup.GetOnlineOrDefault(cluster))
 
 	// Step 1: backup preparation.
 	// This will set PostgreSQL in backup mode for hot snapshots, or fence the Pods for cold snapshots.
@@ -267,14 +268,13 @@ func (se *Reconciler) finalizeSnapshotBackupStep(
 	targetPod *corev1.Pod,
 ) (*ctrl.Result, error) {
 	contextLogger := log.FromContext(ctx).WithValues("podName", targetPod.Name)
-	volumeSnapshotConfig := cluster.Spec.Backup.VolumeSnapshot
 
 	if res, err := exec.finalize(ctx, cluster, backup, targetPod); res != nil || err != nil {
 		return res, err
 	}
 
 	backup.Status.SetAsFinalizing()
-	backup.Status.Online = ptr.To(volumeSnapshotConfig.GetOnline())
+	backup.Status.Online = ptr.To(backup.GetOnlineOrDefault(cluster))
 	snapshots, err := getBackupVolumeSnapshots(ctx, se.cli, backup.Namespace, backup.Name)
 	if err != nil {
 		return nil, err
@@ -647,6 +647,15 @@ func (se *Reconciler) waitSnapshotToBeReady(
 	return nil, nil
 }
 
+// handleSnapshotErrors reacts to a VolumeSnapshot.Status.Error reported by
+// the CSI driver. There's no reliable way to tell a permanent condition (a
+// missing VolumeSnapshotClass, bad credentials, an error with no message at
+// all, ...) from a transient one, and a condition that looks permanent
+// today can become resolvable at any point (someone creates the missing
+// class, fixes the credentials, ...). So every error is retried the same
+// way, requeuing until backup.cnpg.io/volumeSnapshotDeadline elapses. The
+// external-snapshotter sidecar itself keeps retrying CreateSnapshot on its
+// own regardless of what CNPG does here.
 func (se *Reconciler) handleSnapshotErrors(
 	ctx context.Context,
 	backup *apiv1.Backup,
@@ -654,10 +663,6 @@ func (se *Reconciler) handleSnapshotErrors(
 ) (*ctrl.Result, error) {
 	contextLogger := log.FromContext(ctx).
 		WithName("handle_snapshot_errors")
-
-	if !snapshotErr.isRetryable() {
-		return nil, snapshotErr
-	}
 
 	if err := addDeadlineStatus(ctx, se.cli, backup); err != nil {
 		return nil, fmt.Errorf("while adding deadline status: %w", err)

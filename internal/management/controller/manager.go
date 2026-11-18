@@ -61,9 +61,17 @@ type InstanceReconciler struct {
 	firstReconcileDone    atomic.Bool
 	metricsServerExporter *metricserver.Exporter
 
+	// pendingReload is set when the configuration files have been changed
+	// and PostgreSQL has not been reloaded yet
+	pendingReload bool
+
 	certificateReconciler *instancecertificate.Reconciler
 	pluginRepository      repository.Interface
 	primaryLeaseAcquirer  PrimaryLeaseAcquirer
+
+	// availablePluginNames are the plugins whose sidecar this Pod has: their
+	// sockets are registered once, when the instance manager starts
+	availablePluginNames []string
 
 	admission *guard.Admission[*apiv1.Cluster]
 }
@@ -74,6 +82,7 @@ func NewInstanceReconciler(
 	client ctrl.Client,
 	metricsExporter *metricserver.Exporter,
 	pluginRepository repository.Interface,
+	availablePluginNames []string,
 	primaryLeaseAcquirer PrimaryLeaseAcquirer,
 	admission *guard.Admission[*apiv1.Cluster],
 ) *InstanceReconciler {
@@ -86,14 +95,15 @@ func NewInstanceReconciler(
 		metricsServerExporter: metricsExporter,
 		certificateReconciler: instancecertificate.NewReconciler(client, instance),
 		pluginRepository:      pluginRepository,
+		availablePluginNames:  availablePluginNames,
 		primaryLeaseAcquirer:  primaryLeaseAcquirer,
 		admission:             admission,
 	}
 }
 
-// GetExecutedCondition returns the condition that can be checked in order to
+// GetInitializedCondition returns the condition that can be checked in order to
 // be sure initialization has been done
-func (r *InstanceReconciler) GetExecutedCondition() *concurrency.Executed {
+func (r *InstanceReconciler) GetInitializedCondition() *concurrency.Executed {
 	return r.systemInitialization
 }
 

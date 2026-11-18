@@ -25,6 +25,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
@@ -197,6 +198,96 @@ var _ = Describe("Job created via InitDB", func() {
 		Expect(initdbFlags).Should(ContainSubstring("'--icu-rules=&A < z <<< Z'"))
 	})
 
+	DescribeTable("leaves the initdb data checksums default alone when dataChecksums is unset",
+		func(imageName string) {
+			cluster := apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					ImageName: imageName,
+					Bootstrap: &apiv1.BootstrapConfiguration{
+						InitDB: &apiv1.BootstrapInitDB{},
+					},
+				},
+			}
+			cmd := CreatePrimaryJobViaInitdb(cluster, 1)
+			jobCommand := cmd.Spec.Template.Spec.Containers[0].Command
+			initdbFlags := jobCommand[slices.Index(jobCommand, "--initdb-flags")+1]
+			Expect(initdbFlags).ShouldNot(ContainSubstring("--data-checksums"))
+		},
+		Entry("on PostgreSQL 17", "postgres:17.0"),
+		Entry("on PostgreSQL 18", "postgres:18.0"),
+	)
+
+	It("does not set --data-checksums or --no-data-checksums when dataChecksums is true on PostgreSQL 18+", func() {
+		cluster := apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				ImageName: "postgres:18.0",
+				Bootstrap: &apiv1.BootstrapConfiguration{
+					InitDB: &apiv1.BootstrapInitDB{
+						DataChecksums: ptr.To(true),
+					},
+				},
+			},
+		}
+		cmd := CreatePrimaryJobViaInitdb(cluster, 1)
+		jobCommand := cmd.Spec.Template.Spec.Containers[0].Command
+		initdbFlags := jobCommand[slices.Index(jobCommand, "--initdb-flags")+1]
+		Expect(initdbFlags).ShouldNot(ContainSubstring("--data-checksums"))
+	})
+
+	It("sets --no-data-checksums when dataChecksums is false on PostgreSQL 18+", func() {
+		cluster := apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				ImageName: "postgres:18.0",
+				Bootstrap: &apiv1.BootstrapConfiguration{
+					InitDB: &apiv1.BootstrapInitDB{
+						DataChecksums: ptr.To(false),
+					},
+				},
+			},
+		}
+		cmd := CreatePrimaryJobViaInitdb(cluster, 1)
+		jobCommand := cmd.Spec.Template.Spec.Containers[0].Command
+		initdbFlags := jobCommand[slices.Index(jobCommand, "--initdb-flags")+1]
+		Expect(initdbFlags).Should(ContainSubstring("--no-data-checksums"))
+	})
+
+	It("sets --data-checksums when dataChecksums is true on PostgreSQL versions before 18", func() {
+		cluster := apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				ImageName: "postgres:17.0",
+				Bootstrap: &apiv1.BootstrapConfiguration{
+					InitDB: &apiv1.BootstrapInitDB{
+						DataChecksums: ptr.To(true),
+					},
+				},
+			},
+		}
+		cmd := CreatePrimaryJobViaInitdb(cluster, 1)
+		jobCommand := cmd.Spec.Template.Spec.Containers[0].Command
+		initdbFlags := jobCommand[slices.Index(jobCommand, "--initdb-flags")+1]
+		Expect(initdbFlags).Should(ContainSubstring("--data-checksums"))
+		Expect(initdbFlags).ShouldNot(ContainSubstring("--no-data-checksums"))
+	})
+
+	It("does not set --data-checksums or --no-data-checksums when dataChecksums is false on PostgreSQL versions before 18",
+		func() {
+			cluster := apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					ImageName: "postgres:17.0",
+					Bootstrap: &apiv1.BootstrapConfiguration{
+						InitDB: &apiv1.BootstrapInitDB{
+							DataChecksums: ptr.To(false),
+						},
+					},
+				},
+			}
+			cmd := CreatePrimaryJobViaInitdb(cluster, 1)
+			jobCommand := cmd.Spec.Template.Spec.Containers[0].Command
+			initdbFlags := jobCommand[slices.Index(jobCommand, "--initdb-flags")+1]
+			Expect(initdbFlags).ShouldNot(ContainSubstring("--no-data-checksums"))
+			Expect(initdbFlags).ShouldNot(ContainSubstring("--data-checksums"))
+		})
+
 	It("contains correct labels", func() {
 		cluster := apiv1.Cluster{
 			ObjectMeta: metav1.ObjectMeta{
@@ -244,5 +335,46 @@ var _ = Describe("Job created via InitDB", func() {
 			utils.KubernetesAppComponentLabelName: utils.DatabaseComponentName,
 			utils.KubernetesAppManagedByLabelName: utils.ManagerName,
 		}))
+	})
+})
+
+var _ = Describe("Command restoring a volume snapshot", func() {
+	snapshot := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			utils.BackupLabelFileAnnotationName:         "YmFja3VwX2xhYmVs",
+			utils.BackupTablespaceMapFileAnnotationName: "dGFibGVzcGFjZV9tYXA=",
+		},
+	}
+	cluster := apiv1.Cluster{
+		Spec: apiv1.ClusterSpec{
+			WalStorage: &apiv1.StorageConfiguration{Size: "1Gi"},
+			Bootstrap:  &apiv1.BootstrapConfiguration{Recovery: &apiv1.BootstrapRecovery{}},
+		},
+	}
+	command := func(job *batchv1.Job) []string {
+		return job.Spec.Template.Spec.Containers[0].Command
+	}
+
+	It("passes the backup label and the tablespace map to a replica as it does to a primary", func() {
+		primary := command(CreatePrimaryJobViaRestoreSnapshot(cluster, 1, snapshot, nil))
+		replica := command(RestoreReplicaInstance(cluster, 2, snapshot))
+
+		Expect(primary).To(ContainElements(
+			"--backuplabel=YmFja3VwX2xhYmVs", "--tablespacemap=dGFibGVzcGFjZV9tYXA=", "--pg-wal"))
+		Expect(primary).ToNot(ContainElement("--immediate"))
+		Expect(slices.DeleteFunc(slices.Clone(replica), func(arg string) bool {
+			return arg == "--immediate"
+		})).To(Equal(primary))
+		Expect(replica).To(ContainElement("--immediate"))
+	})
+
+	It("passes neither when the snapshot has none", func() {
+		replica := command(RestoreReplicaInstance(cluster, 2, &metav1.ObjectMeta{}))
+		Expect(replica).ToNot(ContainElement(HavePrefix("--backuplabel")))
+		Expect(replica).ToNot(ContainElement(HavePrefix("--tablespacemap")))
+	})
+
+	It("tolerates a missing snapshot", func() {
+		Expect(command(RestoreReplicaInstance(cluster, 2, nil))).To(ContainElement("--immediate"))
 	})
 })

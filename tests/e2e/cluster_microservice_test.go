@@ -21,7 +21,6 @@ package e2e
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -29,12 +28,14 @@ import (
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/cloudnative-pg/cloudnative-pg/tests"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/config"
 	backupasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/backup"
 	clusterasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/cluster"
 	pgasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/postgres"
 	replicationasserts "github.com/cloudnative-pg/cloudnative-pg/tests/internal/asserts/replication"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/internal/resources"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/clusterutils"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/environment"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/exec"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/importdb"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/objects"
@@ -174,8 +175,8 @@ var _ = Describe("Imports with Microservice Approach", Label(tests.LabelImportin
 		importedClusterName = "cluster-pgdump-different-db-version"
 
 		// Gather the current image
-		postgresImage := os.Getenv("POSTGRES_IMG")
-		Expect(postgresImage).ShouldNot(BeEmpty(), "POSTGRES_IMG env should not be empty")
+		postgresImage := config.Current().Postgres.Image
+		Expect(postgresImage).ShouldNot(BeEmpty(), "the postgres image should not be empty")
 
 		// this test case is only applicable if we are not already on the latest major
 		if postgres.IsLatestMajor(postgresImage) {
@@ -248,14 +249,17 @@ func assertTableAndDataOnImportedCluster(
 				tableName,
 				postgres.AppUser,
 			)
-			out, _, err := exec.QueryInInstancePod(
+			out, _, err := exec.EventuallyExecQueryInInstancePod(
 				env.Ctx, env.Client, env.Interface, env.RestClientConfig,
 				exec.PodLocator{
 					Namespace: pod.Namespace,
 					PodName:   pod.Name,
 				},
 				postgres.AppDBName,
-				queryImported)
+				queryImported,
+				environment.RetryTimeout,
+				objects.PollingTime,
+			)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(strings.Contains(out, tableName), err).Should(BeTrue())
 		})

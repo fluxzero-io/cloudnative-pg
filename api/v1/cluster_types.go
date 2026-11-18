@@ -119,6 +119,11 @@ const (
 	// MissingWALDiskSpaceExitCode is the exit code the instance manager
 	// will use to signal that there's no more WAL disk space
 	MissingWALDiskSpaceExitCode = 4
+
+	// MissingWALArchivePlugin is the exit code used by the instance manager
+	// to indicate that it started successfully, but the configured WAL
+	// archiving plugin is not available.
+	MissingWALArchivePlugin = 5
 )
 
 // SnapshotOwnerReference defines the reference type for the owner of the snapshot.
@@ -667,10 +672,12 @@ type LivenessProbe struct {
 	Probe `json:",inline"`
 
 	// Configure the feature that extends the liveness probe for a primary
-	// instance. In addition to the basic checks, this verifies whether the
+	// instance. In addition to the basic checks, this reports whether the
 	// primary is isolated from the Kubernetes API server and from its
-	// replicas, ensuring that it can be safely shut down if network
-	// partition or API unavailability is detected. Enabled by default.
+	// replicas, so the kubelet restarts it through the normal
+	// container-termination path (a smart shutdown, bounded by
+	// `.spec.smartShutdownTimeout`) when a network partition or API
+	// unavailability is detected. Enabled by default.
 	// +optional
 	IsolationCheck *IsolationCheckConfiguration `json:"isolationCheck,omitempty"`
 }
@@ -1889,8 +1896,10 @@ type BootstrapInitDB struct {
 	// +optional
 	Options []string `json:"options,omitempty"`
 
-	// Whether the `-k` option should be passed to initdb,
-	// enabling checksums on data pages (default: `false`)
+	// Whether data checksums are enabled on data pages, to help detect
+	// corruption by the I/O system that would otherwise be silent
+	// (default: `false` before PostgreSQL 18, `true` from PostgreSQL 18 on,
+	// matching the initdb default in each case).
 	// +optional
 	DataChecksums *bool `json:"dataChecksums,omitempty"`
 
@@ -2669,6 +2678,11 @@ type PluginStatus struct {
 	// plugin regarding the RestoreJobHook management
 	// +optional
 	RestoreJobHookCapabilities []string `json:"restoreJobHookCapabilities,omitempty"`
+
+	// PostgresCapabilities are the list of capabilities of the
+	// plugin regarding the PostgreSQL configuration
+	// +optional
+	PostgresCapabilities []string `json:"postgresCapabilities,omitempty"`
 
 	// Status contain the status reported by the plugin through the SetStatusInCluster interface
 	// +optional
